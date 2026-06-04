@@ -1,5 +1,5 @@
 /* =====================================================================================
- *  netio.probe — ESP8266 NodeMCU DS18B20 SNMP v2c Agent  (v1.3) - Alptekin Sünnetci   *
+ *  netio.probe — ESP8266 NodeMCU DS18B20 SNMP v2c Agent  (v1.4)  Alptekin Sünnetci   *
  * =====================================================================================
  *
  *  Bu firmware, ESP8266 (NodeMCU) üzerinde DS18B20'den sıcaklık okur ve bu değeri
@@ -79,6 +79,13 @@
  *    - "Test trap" düğmesi (/testtrap) ile TRAP yapılandırmasını anında doğrulama.
  *    - EEPROM migrasyon zinciri: v1.2 VE v1.1 -> v1.3 (ayarlar korunur).
  *
+ *  v1.4 YENİLİKLER (çalışma-anı donanım yapılandırması + zaman):
+ *    - DS18B20 veri pini, dahili/harici pull-up ve alarm LED/röle pini artık UI'dan ayarlanır.
+ *      (pin/pull-up değişince cihaz yeniden başlar; derleme sabitleri yalnızca varsayılan.)
+ *    - NTP: yapılandırılabilir sunucu; syslog artık UTC RFC 5424 zaman damgası taşır.
+ *    - Panelde canlı UTC saat göstergesi (/status'a ntp epoch alanı eklendi).
+ *    - EEPROM migrasyon zinciri: v1.3 / v1.2 / v1.1 -> v1.4 (ayarlar korunur).
+ *
  *  Derleme: Arduino IDE / arduino-cli, Board = "NodeMCU 1.0 (ESP-12E Module)",
  *           ESP8266 Arduino Core 3.x. Harici kütüphane GEREKMEZ (hepsi core içinde).
  * ===================================================================================== */
@@ -93,6 +100,7 @@
 #include <bearssl/bearssl.h>   // SHA-256 (yönetici parolası hash'i için)
 #include <stddef.h>            // offsetof
 #include <stdarg.h>            // syslogf (vararg)
+#include <time.h>              // NTP / RFC 5424 zaman damgası
 
 /* ===================================== AYARLAR ===================================== */
 
@@ -106,10 +114,13 @@
 #define SENSOR_INTERVAL      5000UL      // Sıcaklık ölçüm aralığı (ms)
 #define DS18B20_CONV_MS      750UL       // 12-bit dönüşüm süresi (ms)
 
-#define CFG_MAGIC            0xA5C30005UL // EEPROM imzası (v1.3: eşik + alarm + TRAP)
+#define CFG_MAGIC            0xA5C30006UL // EEPROM imzası (v1.4: çalışma-anı pin/pull-up + NTP)
+#define CFG_MAGIC_V13        0xA5C30005UL // v1.3 yapısı (migrasyon kaynağı)
 #define CFG_MAGIC_V12        0xA5C30004UL // v1.2 yapısı (migrasyon kaynağı)
 #define CFG_MAGIC_PREV       0xA5C30003UL // v1.1 yapısı (migrasyon kaynağı)
 #define ENTERPRISE_PEN       63333UL      // ÖRNEK private enterprise no. Üretimde IANA'dan kendi PEN'inizi alın.
+
+#define NTP_DEFAULT_SERVER   "pool.ntp.org" // varsayılan NTP sunucusu (boş = kapalı)
 
 #define SNMP_TRAP_PORT       162          // TRAP hedef UDP portu
 #define ALARM_LED_PIN        LED_BUILTIN  // alarm göstergesi (active-LOW); röle için başka GPIO'ya alınabilir
@@ -159,6 +170,10 @@ struct Config {
   uint8_t threshEnable;   // 1 = eşik/alarm aktif
   char trapTargetIp[16];  // SNMP TRAP hedef IP (boş = kapalı)
   char trapCommunity[33]; // TRAP community
+  uint8_t ds18b20Pin;     // DS18B20 veri pini (GPIO)
+  uint8_t usePullup;      // 1 = dahili pull-up (ÖNERİLMEZ), 0 = harici 4.7kΩ
+  uint8_t alarmLedPin;    // alarm LED/röle pini (active-LOW)
+  char ntpServer[33];     // NTP sunucusu (boş = kapalı, UTC zaman damgası yok)
   uint8_t checksum;      // basit XOR sağlama (DAİMA EN SON ALAN)
 };
 
@@ -270,7 +285,14 @@ static void syslogSend(int severity, const char *msg) {
   IPAddress ip;
   if (!ip.fromString(cfg.syslogIp)) return;
   int pri = 16 * 8 + severity;            // facility local0(16) * 8 + severity
-  String s = "<" + String(pri) + ">1 - " + hostName() + " netio.probe - - - " + msg;
+  // RFC 5424 zaman damgası: NTP senkronsa UTC, değilse NILVALUE "-"
+  char ts[24] = "-";
+  time_t now = time(nullptr);
+  if (now > 1700000000) {                 // ~2023+ -> saat senkronize
+    struct tm tmv; gmtime_r(&now, &tmv);
+    strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+  }
+  String s = "<" + String(pri) + ">1 " + ts + " " + hostName() + " netio.probe - - - " + msg;
   uint16_t port = cfg.syslogPort ? cfg.syslogPort : SYSLOG_DEFAULT_PORT;
   if (slogUdp.beginPacket(ip, port)) {
     slogUdp.write((const uint8_t *)s.c_str(), s.length());
@@ -331,6 +353,10 @@ static void setDefaults() {
   cfg.threshHystDeci = 5;                    // 0.5 °C histerezis
   cfg.trapTargetIp[0] = '\0';                // TRAP kapalı
   copyStr(cfg.trapCommunity, "public", sizeof(cfg.trapCommunity));
+  cfg.ds18b20Pin = DS18B20_PIN;              // varsayılan veri pini
+  cfg.usePullup  = USE_INTERNAL_PULLUP;      // varsayılan: harici pull-up
+  cfg.alarmLedPin = ALARM_LED_PIN;           // varsayılan alarm LED'i
+  copyStr(cfg.ntpServer, NTP_DEFAULT_SERVER, sizeof(cfg.ntpServer));
   cfg.configured = 0;
 }
 
@@ -387,6 +413,40 @@ static void migrateFromV12() {
   cfg.configured = old.configured;
 }
 
+// v1.3 EEPROM yapısı (yalnızca migrasyon için, AYNEN korunmalı)
+struct ConfigV13 {
+  uint32_t magic; uint32_t aclNet; uint16_t syslogPort; uint8_t aclBits; uint8_t configured;
+  char ssid[33]; char pass[65]; char roComm[33]; char sysName[33]; char sysLocation[65];
+  char sysContact[65]; char otaPass[33]; char adminUser[33]; char adminSalt[17]; char adminHash[65];
+  char syslogIp[16];
+  int16_t threshHighDeci; int16_t threshLowDeci; int16_t threshHystDeci; uint8_t threshEnable;
+  char trapTargetIp[16]; char trapCommunity[33];
+  uint8_t checksum;
+};
+
+static void migrateFromV13() {
+  ConfigV13 old;
+  EEPROM.get(0, old);
+  setDefaults();                            // v1.4 alanları (pin/pull-up/NTP) varsayılan
+  cfg.aclNet = old.aclNet; cfg.aclBits = old.aclBits; cfg.syslogPort = old.syslogPort;
+  copyStr(cfg.ssid, old.ssid, sizeof(cfg.ssid));
+  copyStr(cfg.pass, old.pass, sizeof(cfg.pass));
+  copyStr(cfg.roComm, old.roComm, sizeof(cfg.roComm));
+  copyStr(cfg.sysName, old.sysName, sizeof(cfg.sysName));
+  copyStr(cfg.sysLocation, old.sysLocation, sizeof(cfg.sysLocation));
+  copyStr(cfg.sysContact, old.sysContact, sizeof(cfg.sysContact));
+  copyStr(cfg.otaPass, old.otaPass, sizeof(cfg.otaPass));
+  copyStr(cfg.adminUser, old.adminUser, sizeof(cfg.adminUser));
+  copyStr(cfg.adminSalt, old.adminSalt, sizeof(cfg.adminSalt));
+  copyStr(cfg.adminHash, old.adminHash, sizeof(cfg.adminHash));
+  copyStr(cfg.syslogIp, old.syslogIp, sizeof(cfg.syslogIp));
+  cfg.threshHighDeci = old.threshHighDeci; cfg.threshLowDeci = old.threshLowDeci;
+  cfg.threshHystDeci = old.threshHystDeci; cfg.threshEnable = old.threshEnable;
+  copyStr(cfg.trapTargetIp, old.trapTargetIp, sizeof(cfg.trapTargetIp));
+  copyStr(cfg.trapCommunity, old.trapCommunity, sizeof(cfg.trapCommunity));
+  cfg.configured = old.configured;
+}
+
 static void loadConfig() {
   uint32_t magic;
   EEPROM.get(0, magic);
@@ -395,12 +455,16 @@ static void loadConfig() {
     if (cfg.checksum == cfgChecksum(cfg)) { Serial.println(F("[CFG] Yapılandırma EEPROM'dan yüklendi.")); return; }
     Serial.println(F("[CFG] Checksum hatası -> varsayılanlar."));
     setDefaults();
+  } else if (magic == CFG_MAGIC_V13) {
+    Serial.println(F("[CFG] v1.3 yapısı algılandı -> v1.4'e taşınıyor (ayarlar korunuyor)."));
+    migrateFromV13();
+    saveConfig();
   } else if (magic == CFG_MAGIC_V12) {
-    Serial.println(F("[CFG] v1.2 yapısı algılandı -> v1.3'e taşınıyor (ayarlar korunuyor)."));
+    Serial.println(F("[CFG] v1.2 yapısı algılandı -> v1.4'e taşınıyor (ayarlar korunuyor)."));
     migrateFromV12();
     saveConfig();
   } else if (magic == CFG_MAGIC_PREV) {
-    Serial.println(F("[CFG] v1.1 yapısı algılandı -> v1.3'e taşınıyor (Wi-Fi/ayarlar korunuyor)."));
+    Serial.println(F("[CFG] v1.1 yapısı algılandı -> v1.4'e taşınıyor (Wi-Fi/ayarlar korunuyor)."));
     migrateFromPrev();
     saveConfig();
   } else {
@@ -465,15 +529,15 @@ static String apSsid() {
  */
 class DS18B20 {
 public:
-  explicit DS18B20(uint8_t p) : pin(p) {}
+  explicit DS18B20(uint8_t p) : pin(p), internalPullup(false) {}
+
+  // Çalışma anında pin ve pull-up modunu ayarla (begin'den ÖNCE çağır).
+  void configure(uint8_t p, bool pullup) { pin = p; internalPullup = pullup; }
 
   void begin() {
-#if USE_INTERNAL_PULLUP
-    pinMode(pin, INPUT_PULLUP);
-#else
-    pinMode(pin, INPUT);   // harici 4.7kΩ pull-up bus'ı HIGH tutar
-#endif
-    Serial.print(F("[DS18B20] Pin: GPIO")); Serial.println(pin);
+    pinMode(pin, internalPullup ? INPUT_PULLUP : INPUT);  // harici 4.7kΩ varsayılan
+    Serial.print(F("[DS18B20] Pin: GPIO")); Serial.print(pin);
+    Serial.println(internalPullup ? F("  (dahili pull-up)") : F("  (harici pull-up)"));
     Serial.println(reset() ? F("[DS18B20] Sensör algılandı (presence).")
                            : F("[DS18B20] UYARI: presence yok! Kablo/pull-up kontrol edin."));
     printRomAddress();
@@ -522,12 +586,9 @@ public:
 
 private:
   uint8_t pin;
+  bool    internalPullup;
 
-#if USE_INTERNAL_PULLUP
-  inline void release() { pinMode(pin, INPUT_PULLUP); }
-#else
-  inline void release() { pinMode(pin, INPUT); }
-#endif
+  inline void release() { pinMode(pin, internalPullup ? INPUT_PULLUP : INPUT); }
 
   bool reset() {
     uint8_t presence;
@@ -634,7 +695,7 @@ static const MibNode MIB[] = {
 };
 static const int MIB_COUNT = sizeof(MIB) / sizeof(MIB[0]);
 
-static const char *SYS_DESCR = "netio.probe v1.3 - ESP8266 DS18B20 SNMP agent";
+static const char *SYS_DESCR = "netio.probe v1.4 - ESP8266 DS18B20 SNMP agent";
 
 // Yanıt için statik tamponlar (tek thread, loop içinde sıralı kullanım)
 static uint8_t S_VB[600];
@@ -1336,6 +1397,7 @@ static String buildAdminPage() {
          "<div class='hd'><span class='dot'></span><span class='wm'>netio<b>.probe</b></span><span class='pill'>online</span></div>"
          "<p class='tag'>SNMP PROBE · YÖNETİM</p>"
          "<div id='alm' class='alm'></div>"
+         "<p class='hint' id='clk' style='margin:0 0 8px'></p>"
          "<div class='grid'>"
          "<div class='m'><label>Sıcaklık</label><b id='temp'>—</b></div>"
          "<div class='m'><label>RSSI</label><b id='rssi'>—</b></div>"
@@ -1390,6 +1452,18 @@ static String buildAdminPage() {
   p += F("'><button class='btn' type='button' id='ttbtn' style='margin-top:10px'>Test trap gönder</button>"
          "<div class='st' id='ttst'></div>"
          "</details>"
+         "<details><summary>Donanım &amp; NTP</summary>"
+         "<label class='lbl'>DS18B20 veri pini (GPIO · güvenli: 4,5,12,13,14)</label><input class='f' name='dpin' type='number' min='0' max='16' value='");
+  p += String(cfg.ds18b20Pin);
+  p += F("'><label class='cbx'><input type='checkbox' name='pup' value='1'");
+  if (cfg.usePullup) p += F(" checked");
+  p += F("> Dahili pull-up kullan (önerilmez; harici 4.7kΩ tercih edin)</label>"
+         "<label class='lbl'>Alarm LED / röle pini (GPIO · active-LOW)</label><input class='f' name='lpin' type='number' min='0' max='16' value='");
+  p += String(cfg.alarmLedPin);
+  p += F("'><label class='lbl'>NTP sunucusu (boş = kapalı · UTC zaman damgası)</label><input class='f' name='ntp' value='");
+  p += htmlEscape(cfg.ntpServer);
+  p += F("'><p class='hint'>Pin veya pull-up değişince cihaz yeniden başlar.</p>"
+         "</details>"
          "<button class='go' type='submit'>Ayarları kaydet</button></form>"
          "<a class='upl' href='/update'>⤓ Firmware güncelle (.bin yükle)</a>"
          "<div class='act'>"
@@ -1413,6 +1487,7 @@ static String buildAdminPage() {
          "if(j.ten&&j.alarm===1){al.className='alm on';al.style.background='rgba(255,99,99,.15)';al.style.color='#ff8a8a';al.textContent='⚠ YÜKSEK SICAKLIK — '+(j.tempd/10).toFixed(1)+' °C (eşik '+(j.thi/10).toFixed(1)+')';}"
          "else if(j.ten&&j.alarm===2){al.className='alm on';al.style.background='rgba(96,165,250,.15)';al.style.color='#93c5fd';al.textContent='⚠ DÜŞÜK SICAKLIK — '+(j.tempd/10).toFixed(1)+' °C (eşik '+(j.tlo/10).toFixed(1)+')';}"
          "else{al.className='alm';al.textContent='';}"
+         "var ck=document.getElementById('clk');ck.textContent=j.ntp>0?('UTC '+new Date(j.ntp*1000).toISOString().replace('T',' ').substring(0,19)):'';"
          "}).catch(function(){});}"
          "tick();setInterval(tick,4000);"
          "var tt=document.getElementById('ttbtn');if(tt){tt.addEventListener('click',function(){var s=document.getElementById('ttst');s.textContent='Gönderiliyor…';fetch('/testtrap',{method:'POST'}).then(function(r){return r.text();}).then(function(t){s.textContent=t;}).catch(function(){s.textContent='Hata.';});});}"
@@ -1468,14 +1543,16 @@ static void handleAdminRoot() {
 
 static void handleStatus() {
   if (!requireAuth()) return;
-  char b[320];
+  char b[360];
+  time_t now = time(nullptr); if (now < 1700000000) now = 0;   // 0 = saat senkron değil
   snprintf(b, sizeof(b),
     "{\"tempd\":%ld,\"oper\":%ld,\"rssi\":%ld,\"up\":%lu,\"heap\":%u,\"rd\":%lu,\"er\":%lu,\"sn\":%lu,"
-    "\"alarm\":%ld,\"ten\":%u,\"thi\":%d,\"tlo\":%d}",
+    "\"alarm\":%ld,\"ten\":%u,\"thi\":%d,\"tlo\":%d,\"ntp\":%lu}",
     (long)g_tempDeci, (long)g_sensorOper, (long)WiFi.RSSI(),
     (unsigned long)uptimeSec(), (unsigned)ESP.getFreeHeap(),
     (unsigned long)g_readCount, (unsigned long)g_errCount, (unsigned long)g_snmpCount,
-    (long)g_alarmState, (unsigned)cfg.threshEnable, (int)cfg.threshHighDeci, (int)cfg.threshLowDeci);
+    (long)g_alarmState, (unsigned)cfg.threshEnable, (int)cfg.threshHighDeci, (int)cfg.threshLowDeci,
+    (unsigned long)now);
   server.send(200, "application/json", b);
 }
 
@@ -1508,25 +1585,31 @@ static void handleAdminSave() {
   if (server.hasArg("trap")) { String s = server.arg("trap"); s.trim(); copyStr(cfg.trapTargetIp, s.c_str(), sizeof(cfg.trapTargetIp)); }
   if (server.hasArg("trapc") && server.arg("trapc").length()) copyStr(cfg.trapCommunity, server.arg("trapc").c_str(), sizeof(cfg.trapCommunity));
   if (!cfg.threshEnable && g_alarmState != 0) { g_alarmState = 0; updateAlarmLed(); }  // alarm kapatıldıysa durumu sıfırla
+  bool hwChanged = false;
+  if (server.hasArg("dpin") && server.arg("dpin").length()) { uint8_t v = (uint8_t)server.arg("dpin").toInt(); if (v != cfg.ds18b20Pin) { cfg.ds18b20Pin = v; hwChanged = true; } }
+  { uint8_t v = server.hasArg("pup") ? 1 : 0; if (v != cfg.usePullup) { cfg.usePullup = v; hwChanged = true; } }
+  if (server.hasArg("lpin") && server.arg("lpin").length()) { uint8_t v = (uint8_t)server.arg("lpin").toInt(); if (v != cfg.alarmLedPin) { cfg.alarmLedPin = v; hwChanged = true; } }
+  if (server.hasArg("ntp")) { String s = server.arg("ntp"); s.trim(); copyStr(cfg.ntpServer, s.c_str(), sizeof(cfg.ntpServer)); }
+  bool reboot = wifiChanged || hwChanged;
   saveConfig();
 
   String p; p.reserve(2200);
   p += F("<!DOCTYPE html><html lang='tr'><head><meta charset='utf-8'>"
          "<meta name='viewport' content='width=device-width,initial-scale=1'>"
          "<meta http-equiv='refresh' content='");
-  p += wifiChanged ? "8;url=/" : "2;url=/";
+  p += reboot ? "8;url=/" : "2;url=/";
   p += F("'><title>netio.probe</title><style>");
   p += FPSTR(STYLE_BASE);
   p += F("</style></head><body><main class='card'>"
          "<div class='hd'><span class='dot'></span><span class='wm'>netio<b>.probe</b></span></div>"
          "<p class='tag'>AYARLAR</p><p class='msg'>");
-  p += wifiChanged ? F("Kaydedildi. WiFi değiştiği için cihaz yeniden başlatılıyor…")
-                   : F("Kaydedildi ve uygulandı. Yönetime dönülüyor…");
+  p += reboot ? F("Kaydedildi. Donanım/WiFi değiştiği için cihaz yeniden başlatılıyor…")
+              : F("Kaydedildi ve uygulandı. Yönetime dönülüyor…");
   p += F("</p><p class='hint'>Yönetici şifresini değiştirdiyseniz tarayıcı yeniden giriş isteyebilir.</p>"
          "</main></body></html>");
   server.send(200, "text/html", p);
 
-  if (wifiChanged) { delay(900); ESP.restart(); }
+  if (reboot) { delay(900); ESP.restart(); }
 }
 
 static void handleReset() {
@@ -1586,8 +1669,9 @@ static void handleMetrics() {
 static void startRunServices() {
   g_mode = MODE_RUN;
   udp.begin(SNMP_PORT);
-  pinMode(ALARM_LED_PIN, OUTPUT);
-  digitalWrite(ALARM_LED_PIN, g_alarmState != 0 ? LOW : HIGH);   // alarm göstergesi (active-LOW)
+  pinMode(cfg.alarmLedPin, OUTPUT);
+  digitalWrite(cfg.alarmLedPin, g_alarmState != 0 ? LOW : HIGH);   // alarm göstergesi (active-LOW)
+  if (cfg.ntpServer[0]) { configTime(0, 0, cfg.ntpServer); Serial.print(F("[NTP] sunucu: ")); Serial.println(cfg.ntpServer); }
   setupOTA();
 
   // --- HTTP Basic Auth korumalı web yönetim arayüzü ---
@@ -1684,7 +1768,7 @@ static void setSensorOper(int32_t v, const char *why) {
 // Alarm LED'ini güncelle (active-LOW: LOW=yanık). Alarmda yanar, normalde söner.
 static void updateAlarmLed() {
   if (g_mode != MODE_RUN) return;
-  digitalWrite(ALARM_LED_PIN, g_alarmState != 0 ? LOW : HIGH);
+  digitalWrite(cfg.alarmLedPin, g_alarmState != 0 ? LOW : HIGH);
 }
 
 // Alarm durumu değişti: logla + TRAP gönder + LED güncelle
@@ -1743,7 +1827,7 @@ static void serviceSensor() {
 void setup() {
   Serial.begin(115200);
   delay(50);
-  Serial.println(F("\n\n=== netio.probe v1.3 (ESP8266 DS18B20 SNMP) ==="));
+  Serial.println(F("\n\n=== netio.probe v1.4 (ESP8266 DS18B20 SNMP) ==="));
   Serial.println("Chip ID : 0x" + String(ESP.getChipId(), HEX));
   Serial.println("Host    : " + hostName());
   Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " B");
@@ -1764,6 +1848,7 @@ void setup() {
     }
   }
 
+  ds18b20.configure(cfg.ds18b20Pin, cfg.usePullup != 0);   // çalışma-anı pin + pull-up
   ds18b20.begin();
 
   if (cfg.configured && strlen(cfg.ssid) > 0 && connectSTA(STA_CONNECT_TIMEOUT)) {
@@ -1887,4 +1972,3 @@ void loop() {
  *  - Fabrika reset: web UI düğmesi VEYA GPIO14(D5)<->GND ~2 sn köprü VEYA GPIO0 3 sn.
  *  - Production için SNMPv3 (auth+priv) + HTTPS/ters proxy önerilir; bu agent v2c kapsamındadır.
  * ===================================================================================== */
-
