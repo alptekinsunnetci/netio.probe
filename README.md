@@ -434,12 +434,7 @@ v1.2 hardens the device meaningfully, but be clear about what it does and does n
 - **NTP** time sync for real syslog/event timestamps.
 - **Multi-sensor** 1-Wire enumeration and optional SHT3x humidity.
 - Configurable GPIO / PEN from the UI.
----
- 
-## License
- 
-This firmware is provided **as-is, without warranty**. MIT is a sensible default if you want one — add a `LICENSE` file with your chosen terms.
- 
+
 ---
  
 <sub>netio.probe · ESP8266 + DS18B20 · SNMP v2c temperature probe firmware (v1.2)</sub>
