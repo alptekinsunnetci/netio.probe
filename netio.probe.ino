@@ -1,5 +1,5 @@
 /* =====================================================================================
- *  netio.probe — ESP8266 NodeMCU DS18B20 SNMP v2c Agent  (v1.1) - Alptekin Sünnetci   *
+ *  netio.probe — ESP8266 NodeMCU DS18B20 SNMP v2c Agent  (v1.2) - Alptekin Sünnetci   *
  * =====================================================================================
  *
  *  Bu firmware, ESP8266 (NodeMCU) üzerinde DS18B20'den sıcaklık okur ve bu değeri
@@ -59,6 +59,18 @@
  *    - Yönetici kullanıcı adı/şifresi yapılandırılabilir; SNMP community canlı değişir.
  *    NOT: HTTP Basic Auth ve SNMP v2c düz metindir; güvenilir ağda kullanın.
  *
+ *  v1.2 YENİLİKLER (güvenlik + gözlemlenebilirlik + dayanıklılık):
+ *    - Yönetici parolası artık DÜZ saklanmaz: salt + SHA-256 hash (BearSSL).
+ *    - Kaba-kuvvet kilidi: kaynak IP başına N hatadan sonra geçici kilit.
+ *    - Kaynak-IP ACL (CIDR): hem SNMP hem web/metrics yalnızca izinli ağdan erişilir.
+ *    - Prometheus /metrics ucu (ACL korumalı, login gerektirmez).
+ *    - Syslog (RFC 5424 / UDP): boot, config, OTA, sensör arızası ve AUTH-FAIL olayları.
+ *    - Web OTA için opsiyonel MD5 bütünlük doğrulaması.
+ *    - DS18B20: tüm-0x00/0xFF scratchpad (hat arızası) reddi; sensör durum geçişi loglanır.
+ *    - EEPROM migrasyonu: v1.1 -> v1.2 geçişinde Wi-Fi/ayarlar KORUNUR (sıfırlanmaz).
+ *    - Watchdog beslemesi + heap-taban koruması (uzun süre düşük heap -> kontrollü reboot).
+ *    - Portal/admin parolası alanı artık önceden DOLDURULMAZ (parola sızıntısı kapatıldı).
+ *
  *  Derleme: Arduino IDE / arduino-cli, Board = "NodeMCU 1.0 (ESP-12E Module)",
  *           ESP8266 Arduino Core 3.x. Harici kütüphane GEREKMEZ (hepsi core içinde).
  * ===================================================================================== */
@@ -70,6 +82,9 @@
 #include <WiFiUdp.h>
 #include <ArduinoOTA.h>
 #include <EEPROM.h>
+#include <bearssl/bearssl.h>   // SHA-256 (yönetici parolası hash'i için)
+#include <stddef.h>            // offsetof
+#include <stdarg.h>            // syslogf (vararg)
 
 /* ===================================== AYARLAR ===================================== */
 
@@ -83,29 +98,50 @@
 #define SENSOR_INTERVAL      5000UL      // Sıcaklık ölçüm aralığı (ms)
 #define DS18B20_CONV_MS      750UL       // 12-bit dönüşüm süresi (ms)
 
-#define CFG_MAGIC            0xA5C30003UL // EEPROM yapı imzası (struct değişti -> bump)
+#define CFG_MAGIC            0xA5C30004UL // EEPROM imzası (v1.2: ACL + syslog + parola hash)
+#define CFG_MAGIC_PREV         0xA5C30003UL // v1.1 yapısı (migrasyon kaynağı)
 #define ENTERPRISE_PEN       63333UL      // ÖRNEK private enterprise no. Üretimde IANA'dan kendi PEN'inizi alın.
 
 #define FACTORY_RESET_PIN    14           // GPIO14 (D5). Bu pin <-> GND kısa devre = fabrika reset
 #define FACTORY_RESET_HOLD_MS 2000UL      // Köprü bu kadar süre kapalı kalırsa sıfırla
 #define WEB_PORT             80
 
+#define AUTH_MAX_FAILS       5            // bu kadar hatalı girişten sonra kaynak IP kilitlenir
+#define AUTH_LOCKOUT_MS      60000UL      // kilit süresi (ms)
+#define HEAP_FLOOR           6000UL       // boş heap bu eşiğin altında uzun kalırsa reboot
+#define HEAP_FLOOR_MS        15000UL      // ne kadar süre (ms)
+#define SYSLOG_DEFAULT_PORT  514
+
+// RFC 5424 severity seviyeleri
+#define SLOG_ERR     3
+#define SLOG_WARNING 4
+#define SLOG_NOTICE  5
+#define SLOG_INFO    6
+
 /* ============================== KONFİGÜRASYON DEPOSU =============================== */
+
+// NOT: Arduino otomatik-prototip üreticisi, AuthSlot* döndüren fonksiyon için
+// dosyanın başına prototip ekler; bu yüzden tip ilk fonksiyondan ÖNCE tanımlanmalı.
+struct AuthSlot { uint32_t ip; uint8_t fails; uint32_t until; };
 
 struct Config {
   uint32_t magic;
+  uint32_t aclNet;       // izinli ağ (host byte order); aclBits=0 ise yok sayılır
+  uint16_t syslogPort;   // syslog UDP portu (0/boşsa 514)
+  uint8_t  aclBits;      // CIDR prefix (0 = tüm IP'lere izin)
+  uint8_t  configured;   // 1 = WiFi yapılandırıldı
   char ssid[33];
   char pass[65];
-  char roComm[33];      // SNMP read-only community
-  char rwComm[33];      // SNMP read-write community (şimdilik SET yok, ileri kullanım)
-  char sysName[33];     // SNMPv2-MIB::sysName
-  char sysLocation[65]; // sysLocation
-  char sysContact[65];  // sysContact
-  char otaPass[33];     // espota (ArduinoOTA) şifresi
-  char adminUser[33];   // web UI yönetici kullanıcı adı (HTTP Basic Auth)
-  char adminPass[33];   // web UI yönetici şifresi
-  uint8_t configured;   // 1 = WiFi yapılandırıldı
-  uint8_t checksum;     // basit XOR sağlama
+  char roComm[33];       // SNMP read-only community
+  char sysName[33];      // SNMPv2-MIB::sysName
+  char sysLocation[65];  // sysLocation
+  char sysContact[65];   // sysContact
+  char otaPass[33];      // espota (ArduinoOTA) şifresi
+  char adminUser[33];    // web UI yönetici kullanıcı adı
+  char adminSalt[17];    // 8 bayt -> 16 hex (parola tuzu)
+  char adminHash[65];    // SHA-256(salt|parola) -> 64 hex (parola DÜZ saklanmaz)
+  char syslogIp[16];     // syslog sunucu IP (boş = kapalı)
+  uint8_t checksum;      // basit XOR sağlama (DAİMA EN SON ALAN)
 };
 
 Config cfg;
@@ -113,8 +149,8 @@ Config cfg;
 static uint8_t cfgChecksum(const Config &c) {
   const uint8_t *p = (const uint8_t *)&c;
   uint8_t x = 0;
-  // checksum alanı hariç her byte'ı XOR'la
-  size_t n = sizeof(Config) - 1;
+  // checksum alanından ÖNCEKİ tüm baytları XOR'la (hizalama dolgusunu dışla)
+  size_t n = offsetof(Config, checksum);
   for (size_t i = 0; i < n; i++) x ^= p[i];
   return x;
 }
@@ -126,27 +162,194 @@ static void copyStr(char *dst, const char *src, size_t dstSize) {
   dst[i] = '\0';
 }
 
+/* ----------------------- güvenlik / ağ yardımcıları (v1.2) ----------------------- */
+
+static String hostName();   // ileri bildirim (syslog kullanır)
+
+// SHA-256(salt | parola) -> 64 karakter hex
+static void sha256Hex(const char *salt, const char *pass, char *out65) {
+  br_sha256_context c;
+  br_sha256_init(&c);
+  br_sha256_update(&c, salt, strlen(salt));
+  br_sha256_update(&c, pass, strlen(pass));
+  uint8_t d[32];
+  br_sha256_out(&c, d);
+  static const char *hx = "0123456789abcdef";
+  for (int i = 0; i < 32; i++) { out65[i * 2] = hx[d[i] >> 4]; out65[i * 2 + 1] = hx[d[i] & 0x0F]; }
+  out65[64] = '\0';
+}
+
+// Donanım RNG'den 8 baytlık tuz (16 hex)
+static void genSalt(char *out17) {
+  static const char *hx = "0123456789abcdef";
+  for (int i = 0; i < 8; i++) {
+    uint8_t b = (uint8_t)(RANDOM_REG32 & 0xFF);
+    out17[i * 2] = hx[b >> 4]; out17[i * 2 + 1] = hx[b & 0x0F];
+  }
+  out17[16] = '\0';
+}
+
+static void setAdminPassword(const char *pw) {
+  genSalt(cfg.adminSalt);
+  sha256Hex(cfg.adminSalt, pw, cfg.adminHash);
+}
+
+static bool checkAdminPassword(const char *pw) {
+  char h[65];
+  sha256Hex(cfg.adminSalt, pw, h);
+  uint8_t diff = 0;                       // sabit-zaman karşılaştırma
+  for (int i = 0; i < 64; i++) diff |= (uint8_t)(cfg.adminHash[i] ^ h[i]);
+  return diff == 0 && cfg.adminHash[0] != '\0';
+}
+
+// Basic Auth başlığı için minimal base64 çözücü
+static String b64Decode(const String &in) {
+  String out;
+  int buf = 0, bits = 0;
+  for (size_t i = 0; i < in.length(); i++) {
+    char c = in[i]; int v;
+    if (c >= 'A' && c <= 'Z') v = c - 'A';
+    else if (c >= 'a' && c <= 'z') v = c - 'a' + 26;
+    else if (c >= '0' && c <= '9') v = c - '0' + 52;
+    else if (c == '+') v = 62;
+    else if (c == '/') v = 63;
+    else continue;                        // '=' ve diğerlerini atla
+    buf = (buf << 6) | v; bits += 6;
+    if (bits >= 8) { bits -= 8; out += (char)((buf >> bits) & 0xFF); }
+  }
+  return out;
+}
+
+// ---- Kaynak-IP ACL (CIDR) ----
+static bool ipAllowed(IPAddress ip) {
+  if (cfg.aclBits == 0) return true;      // 0 = herkese izin
+  uint32_t a = ((uint32_t)ip[0] << 24) | ((uint32_t)ip[1] << 16) | ((uint32_t)ip[2] << 8) | ip[3];
+  uint32_t mask = (cfg.aclBits >= 32) ? 0xFFFFFFFFUL : (0xFFFFFFFFUL << (32 - cfg.aclBits));
+  return (a & mask) == (cfg.aclNet & mask);
+}
+static bool parseCidr(const String &s, uint32_t &net, uint8_t &bits) {
+  int slash = s.indexOf('/');
+  if (slash < 0) return false;
+  IPAddress ip;
+  if (!ip.fromString(s.substring(0, slash))) return false;
+  int b = s.substring(slash + 1).toInt();
+  if (b < 0 || b > 32) return false;
+  net = ((uint32_t)ip[0] << 24) | ((uint32_t)ip[1] << 16) | ((uint32_t)ip[2] << 8) | ip[3];
+  bits = (uint8_t)b;
+  return true;
+}
+static String cidrStr() {
+  if (cfg.aclBits == 0) return String("0.0.0.0/0");
+  IPAddress ip((cfg.aclNet >> 24) & 0xFF, (cfg.aclNet >> 16) & 0xFF, (cfg.aclNet >> 8) & 0xFF, cfg.aclNet & 0xFF);
+  return ip.toString() + "/" + String(cfg.aclBits);
+}
+
+// ---- Syslog (RFC 5424 / UDP) ----
+static WiFiUDP slogUdp;
+static void syslogSend(int severity, const char *msg) {
+  Serial.print(F("[LOG] ")); Serial.println(msg);
+  if (cfg.syslogIp[0] == '\0' || WiFi.status() != WL_CONNECTED) return;
+  IPAddress ip;
+  if (!ip.fromString(cfg.syslogIp)) return;
+  int pri = 16 * 8 + severity;            // facility local0(16) * 8 + severity
+  String s = "<" + String(pri) + ">1 - " + hostName() + " netio.probe - - - " + msg;
+  uint16_t port = cfg.syslogPort ? cfg.syslogPort : SYSLOG_DEFAULT_PORT;
+  if (slogUdp.beginPacket(ip, port)) {
+    slogUdp.write((const uint8_t *)s.c_str(), s.length());
+    slogUdp.endPacket();
+  }
+}
+static void syslogf(int severity, const char *fmt, ...) {
+  char b[200];
+  va_list a; va_start(a, fmt);
+  vsnprintf(b, sizeof(b), fmt, a);
+  va_end(a);
+  syslogSend(severity, b);
+}
+
+// ---- Kaba-kuvvet kilidi (kaynak IP başına) ----  (AuthSlot tipi yukarıda tanımlı)
+static AuthSlot authSlots[4];
+static AuthSlot *authSlotFor(uint32_t ip) {
+  AuthSlot *free = nullptr, *oldest = &authSlots[0];
+  for (auto &s : authSlots) {
+    if (s.ip == ip) return &s;
+    if (s.ip == 0 && !free) free = &s;
+    if (s.until < oldest->until) oldest = &s;
+  }
+  AuthSlot *slot = free ? free : oldest;
+  slot->ip = ip; slot->fails = 0; slot->until = 0;
+  return slot;
+}
+static bool authLockedOut(IPAddress ip) {
+  uint32_t k = (uint32_t)ip;
+  for (auto &s : authSlots) if (s.ip == k) return millis() < s.until;
+  return false;
+}
+static void authNoteFail(IPAddress ip) {
+  AuthSlot *s = authSlotFor((uint32_t)ip);
+  if (s->fails < 255) s->fails++;
+  if (s->fails >= AUTH_MAX_FAILS) s->until = millis() + AUTH_LOCKOUT_MS;
+}
+static void authNoteOK(IPAddress ip) {
+  AuthSlot *s = authSlotFor((uint32_t)ip);
+  s->fails = 0; s->until = 0;
+}
+
 static void setDefaults() {
   memset(&cfg, 0, sizeof(cfg));
   cfg.magic = CFG_MAGIC;
   copyStr(cfg.roComm, "public", sizeof(cfg.roComm));
-  copyStr(cfg.rwComm, "private", sizeof(cfg.rwComm));
   copyStr(cfg.sysName, "netio.probe", sizeof(cfg.sysName));
   copyStr(cfg.sysLocation, "", sizeof(cfg.sysLocation));
   copyStr(cfg.sysContact, "", sizeof(cfg.sysContact));
   copyStr(cfg.otaPass, "esp8266ota", sizeof(cfg.otaPass));
   copyStr(cfg.adminUser, "admin", sizeof(cfg.adminUser));
-  copyStr(cfg.adminPass, "netioprobe", sizeof(cfg.adminPass));  // !! İLK GİRİŞTE DEĞİŞTİRİN
+  setAdminPassword("netioprobe");          // !! İLK GİRİŞTE DEĞİŞTİRİN (hash olarak saklanır)
+  cfg.aclNet = 0; cfg.aclBits = 0;          // ACL kapalı (tüm IP'lere izin)
+  cfg.syslogIp[0] = '\0'; cfg.syslogPort = SYSLOG_DEFAULT_PORT;
   cfg.configured = 0;
 }
 
+// v1.1 EEPROM yapısı (yalnızca migrasyon için, AYNEN korunmalı)
+struct ConfigPrev {
+  uint32_t magic;
+  char ssid[33]; char pass[65]; char roComm[33]; char rwComm[33];
+  char sysName[33]; char sysLocation[65]; char sysContact[65]; char otaPass[33];
+  char adminUser[33]; char adminPass[33];
+  uint8_t configured; uint8_t checksum;
+};
+
+static void migrateFromPrev() {
+  ConfigPrev old;
+  EEPROM.get(0, old);
+  setDefaults();                            // yeni alanlar varsayılan
+  copyStr(cfg.ssid, old.ssid, sizeof(cfg.ssid));
+  copyStr(cfg.pass, old.pass, sizeof(cfg.pass));
+  copyStr(cfg.roComm, old.roComm, sizeof(cfg.roComm));
+  copyStr(cfg.sysName, old.sysName, sizeof(cfg.sysName));
+  copyStr(cfg.sysLocation, old.sysLocation, sizeof(cfg.sysLocation));
+  copyStr(cfg.sysContact, old.sysContact, sizeof(cfg.sysContact));
+  copyStr(cfg.otaPass, old.otaPass, sizeof(cfg.otaPass));
+  copyStr(cfg.adminUser, old.adminUser[0] ? old.adminUser : "admin", sizeof(cfg.adminUser));
+  setAdminPassword(old.adminPass[0] ? old.adminPass : "netioprobe");  // düz parolayı hash'e çevir
+  cfg.configured = old.configured;
+}
+
 static void loadConfig() {
-  EEPROM.get(0, cfg);
-  if (cfg.magic != CFG_MAGIC || cfg.checksum != cfgChecksum(cfg)) {
+  uint32_t magic;
+  EEPROM.get(0, magic);
+  if (magic == CFG_MAGIC) {
+    EEPROM.get(0, cfg);
+    if (cfg.checksum == cfgChecksum(cfg)) { Serial.println(F("[CFG] Yapılandırma EEPROM'dan yüklendi.")); return; }
+    Serial.println(F("[CFG] Checksum hatası -> varsayılanlar."));
+    setDefaults();
+  } else if (magic == CFG_MAGIC_PREV) {
+    Serial.println(F("[CFG] v1.1 yapısı algılandı -> v1.2'ye taşınıyor (Wi-Fi/ayarlar korunuyor)."));
+    migrateFromPrev();
+    saveConfig();
+  } else {
     Serial.println(F("[CFG] Geçerli yapılandırma yok, varsayılanlar yükleniyor."));
     setDefaults();
-  } else {
-    Serial.println(F("[CFG] Yapılandırma EEPROM'dan yüklendi."));
   }
 }
 
@@ -156,6 +359,7 @@ static void saveConfig() {
   EEPROM.put(0, cfg);
   EEPROM.commit();
   Serial.println(F("[CFG] Yapılandırma kaydedildi."));
+  syslogf(SLOG_NOTICE, "config saved");
 }
 
 static void resetConfig() {
@@ -234,6 +438,11 @@ public:
     uint8_t d[9];
     for (int i = 0; i < 9; i++) d[i] = readByte();
     if (crc8(d, 8) != d[8]) return NAN;
+
+    // Hat arızası: tüm baytlar 0x00 (bus LOW takılı -> CRC=0 ile geçebilir) veya 0xFF
+    bool allZero = true, allFF = true;
+    for (int i = 0; i < 9; i++) { if (d[i] != 0x00) allZero = false; if (d[i] != 0xFF) allFF = false; }
+    if (allZero || allFF) return NAN;
 
     int16_t raw = (int16_t)((d[1] << 8) | d[0]);
     float t = raw * 0.0625f;          // 12-bit: LSB = 1/16 °C
@@ -363,7 +572,7 @@ static const MibNode MIB[] = {
 };
 static const int MIB_COUNT = sizeof(MIB) / sizeof(MIB[0]);
 
-static const char *SYS_DESCR = "netio.probe v2.1 - ESP8266 DS18B20 SNMP agent";
+static const char *SYS_DESCR = "netio.probe v1.2 - ESP8266 DS18B20 SNMP agent";
 
 // Yanıt için statik tamponlar (tek thread, loop içinde sıralı kullanım)
 static uint8_t S_VB[600];
@@ -603,6 +812,7 @@ static void snmpHandle() {
   static uint8_t in[1024];
   int len = udp.read(in, sizeof(in));
   if (len <= 0) return;
+  if (!ipAllowed(udp.remoteIP())) return;        // ACL: izinsiz kaynak IP -> paketi işleme
 
   static uint8_t out[768];
   size_t outLen = snmpProcess(in, (size_t)len, out);
@@ -730,7 +940,8 @@ static String buildPortalPage() {
   p += "<label class='lbl'>sysContact</label><input class='f' name='sc' value='" + htmlEscape(cfg.sysContact) + "'>";
   p += "<label class='lbl'>OTA şifresi</label><input class='f' name='ota' value='" + htmlEscape(cfg.otaPass) + "'>";
   p += "<label class='lbl'>Yönetici kullanıcı</label><input class='f' name='au' value='" + htmlEscape(cfg.adminUser) + "'>";
-  p += "<label class='lbl'>Yönetici şifresi</label><input class='f' name='ap' value='" + htmlEscape(cfg.adminPass) + "'>";
+  p += F("<label class='lbl'>Yönetici şifresi (boş = değişmez)</label>"
+         "<input class='f' name='ap' type='password' autocomplete='off'>");
   p += F("</details>"
          "<button class='go' type='submit'>Bağlan →</button>"
          "<p class='hint'>Kaydedince cihaz yeniden başlar ve ağa bağlanır.</p>"
@@ -789,7 +1000,7 @@ static void handleSave() {
   if (server.hasArg("sc")) copyStr(cfg.sysContact, server.arg("sc").c_str(), sizeof(cfg.sysContact));
   if (server.hasArg("ota") && server.arg("ota").length()) copyStr(cfg.otaPass, server.arg("ota").c_str(), sizeof(cfg.otaPass));
   if (server.hasArg("au") && server.arg("au").length()) copyStr(cfg.adminUser, server.arg("au").c_str(), sizeof(cfg.adminUser));
-  if (server.hasArg("ap") && server.arg("ap").length()) copyStr(cfg.adminPass, server.arg("ap").c_str(), sizeof(cfg.adminPass));
+  if (server.hasArg("ap") && server.arg("ap").length()) setAdminPassword(server.arg("ap").c_str());
 
   cfg.configured = (strlen(cfg.ssid) > 0) ? 1 : 0;
   saveConfig();
@@ -934,11 +1145,37 @@ static const char STYLE_BASE[] PROGMEM =
   "@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}";
 
 // HTTP Basic Auth doğrulaması; başarısızsa 401 döndürüp false döner
+// Authorization: Basic ... başlığını çözüp kullanıcı+hash ile doğrula
+static bool authClientOK() {
+  if (!server.hasHeader("Authorization")) return false;
+  String h = server.header("Authorization");
+  if (!h.startsWith("Basic ")) return false;
+  String creds = b64Decode(h.substring(6));     // "kullanıcı:parola"
+  int c = creds.indexOf(':');
+  if (c < 0) return false;
+  String u = creds.substring(0, c);
+  String p = creds.substring(c + 1);
+  return u == String(cfg.adminUser) && checkAdminPassword(p.c_str());
+}
+
 static bool requireAuth() {
-  if (!server.authenticate(cfg.adminUser, cfg.adminPass)) {
+  IPAddress ip = server.client().remoteIP();
+  if (!ipAllowed(ip)) {
+    syslogf(SLOG_WARNING, "web ACL deny src=%s", ip.toString().c_str());
+    server.send(403, "text/plain", "403 - kaynak IP izinli degil (ACL)");
+    return false;
+  }
+  if (authLockedOut(ip)) {
+    server.send(429, "text/plain", "429 - cok fazla hatali giris, biraz bekleyin");
+    return false;
+  }
+  if (!authClientOK()) {
+    authNoteFail(ip);
+    syslogf(SLOG_WARNING, "web auth fail src=%s user=%s", ip.toString().c_str(), cfg.adminUser);
     server.requestAuthentication();
     return false;
   }
+  authNoteOK(ip);
   return true;
 }
 
@@ -993,7 +1230,13 @@ static String buildAdminPage() {
   p += F("'><label class='lbl'>WiFi şifresi (boş = değişmez)</label><div class='pw'>"
          "<input class='f' id='wp' name='pass' type='password' autocomplete='off'>"
          "<button type='button' onclick='pw(this,\"wp\")'>göster</button></div>"
-         "</details>"
+         "<label class='lbl'>Erişim listesi (CIDR · 0.0.0.0/0 = herkes)</label><input class='f' name='acl' value='");
+  p += htmlEscape(cidrStr());
+  p += F("'><label class='lbl'>Syslog sunucu IP (boş = kapalı)</label><input class='f' name='slog' value='");
+  p += htmlEscape(String(cfg.syslogIp));
+  p += F("'><label class='lbl'>Syslog UDP port</label><input class='f' name='slogp' value='");
+  p += String(cfg.syslogPort);
+  p += F("'></details>"
          "<button class='go' type='submit'>Ayarları kaydet</button></form>"
          "<a class='upl' href='/update'>⤓ Firmware güncelle (.bin yükle)</a>"
          "<div class='act'>"
@@ -1037,7 +1280,8 @@ static String buildUpdatePage() {
          "<p class='tag'>FIRMWARE · WEB OTA</p>"
          "<form id='f' method='POST' action='/update' enctype='multipart/form-data'>"
          "<div class='drop'>Derlenmiş <b>.bin</b> dosyasını seçin"
-         "<input id='file' type='file' name='firmware' accept='.bin' required></div>"
+         "<input id='file' type='file' name='firmware' accept='.bin' required>"
+         "<input id='md5' type='text' name='md5' autocomplete='off' placeholder='MD5 (opsiyonel · 32 hex)' style='width:100%;margin-top:12px;box-sizing:border-box'></div>"
          "<div class='bar' id='bar'><i id='barf'></i></div>"
          "<div class='st' id='st'></div>"
          "<button class='go' type='submit'>Yükle ve güncelle</button>"
@@ -1048,7 +1292,8 @@ static String buildUpdatePage() {
          "var f=document.getElementById('f'),file=document.getElementById('file'),bar=document.getElementById('bar'),barf=document.getElementById('barf'),st=document.getElementById('st');"
          "f.addEventListener('submit',function(e){e.preventDefault();if(!file.files.length){st.textContent='Önce bir .bin seçin.';return;}"
          "var fd=new FormData();fd.append('firmware',file.files[0]);"
-         "var x=new XMLHttpRequest();x.open('POST','/update');"
+         "var m=document.getElementById('md5').value.trim();var url='/update'+(m.length===32?('?md5='+encodeURIComponent(m)):'');"
+         "var x=new XMLHttpRequest();x.open('POST',url);"
          "bar.style.display='block';st.textContent='Yükleniyor…';"
          "x.upload.onprogress=function(ev){if(ev.lengthComputable){var pc=Math.round(ev.loaded/ev.total*100);barf.style.width=pc+'%';st.textContent='Yükleniyor… '+pc+'%';}};"
          "x.onload=function(){if(x.status===200){barf.style.width='100%';st.textContent='Tamamlandı. Cihaz yeniden başlatılıyor…';setTimeout(function(){location.href='/';},6000);}else if(x.status===401){st.textContent='Yetki hatası (401).';}else{st.textContent='Hata: '+x.status+' '+x.responseText;}};"
@@ -1088,7 +1333,14 @@ static void handleAdminSave() {
   if (server.hasArg("sc")) copyStr(cfg.sysContact, server.arg("sc").c_str(), sizeof(cfg.sysContact));
   if (server.hasArg("ota") && server.arg("ota").length()) copyStr(cfg.otaPass, server.arg("ota").c_str(), sizeof(cfg.otaPass));
   if (server.hasArg("au") && server.arg("au").length())  copyStr(cfg.adminUser, server.arg("au").c_str(), sizeof(cfg.adminUser));
-  if (server.hasArg("ap") && server.arg("ap").length())  copyStr(cfg.adminPass, server.arg("ap").c_str(), sizeof(cfg.adminPass));
+  if (server.hasArg("ap") && server.arg("ap").length())  setAdminPassword(server.arg("ap").c_str());
+  if (server.hasArg("acl")) {
+    String a = server.arg("acl"); a.trim();
+    if (a.length() == 0 || a == "0.0.0.0/0") { cfg.aclNet = 0; cfg.aclBits = 0; }
+    else { uint32_t net; uint8_t bits; if (parseCidr(a, net, bits)) { cfg.aclNet = net; cfg.aclBits = bits; } }
+  }
+  if (server.hasArg("slog")) { String s = server.arg("slog"); s.trim(); copyStr(cfg.syslogIp, s.c_str(), sizeof(cfg.syslogIp)); }
+  if (server.hasArg("slogp") && server.arg("slogp").length()) cfg.syslogPort = (uint16_t)server.arg("slogp").toInt();
   saveConfig();
 
   String p; p.reserve(2200);
@@ -1144,6 +1396,24 @@ static void handleReboot() {
   ESP.restart();
 }
 
+// Prometheus text-exposition. ACL korumalı, login GEREKMEZ (scrape için).
+static void handleMetrics() {
+  IPAddress ip = server.client().remoteIP();
+  if (!ipAllowed(ip)) { server.send(403, "text/plain", "403"); return; }
+  String m; m.reserve(1100);
+  m += F("# HELP netio_temp_celsius DS18B20 sicakligi (C)\n# TYPE netio_temp_celsius gauge\n");
+  if (g_sensorOper == 1) { m += F("netio_temp_celsius "); m += String(g_tempDeci / 10.0, 2); m += '\n'; }
+  m += F("# HELP netio_sensor_up Sensor calisiyor (1=ok)\n# TYPE netio_sensor_up gauge\nnetio_sensor_up ");
+  m += String(g_sensorOper == 1 ? 1 : 0); m += '\n';
+  m += F("# TYPE netio_rssi_dbm gauge\nnetio_rssi_dbm "); m += String((long)WiFi.RSSI()); m += '\n';
+  m += F("# TYPE netio_free_heap_bytes gauge\nnetio_free_heap_bytes "); m += String((unsigned)ESP.getFreeHeap()); m += '\n';
+  m += F("# TYPE netio_uptime_seconds counter\nnetio_uptime_seconds "); m += String((unsigned long)uptimeSec()); m += '\n';
+  m += F("# TYPE netio_snmp_requests_total counter\nnetio_snmp_requests_total "); m += String((unsigned long)g_snmpCount); m += '\n';
+  m += F("# TYPE netio_sensor_reads_total counter\nnetio_sensor_reads_total "); m += String((unsigned long)g_readCount); m += '\n';
+  m += F("# TYPE netio_sensor_errors_total counter\nnetio_sensor_errors_total "); m += String((unsigned long)g_errCount); m += '\n';
+  server.send(200, "text/plain; version=0.0.4; charset=utf-8", m);
+}
+
 static void startRunServices() {
   g_mode = MODE_RUN;
   udp.begin(SNMP_PORT);
@@ -1155,6 +1425,7 @@ static void startRunServices() {
   server.on("/save",   HTTP_POST, handleAdminSave);
   server.on("/reset",  HTTP_POST, handleReset);
   server.on("/reboot", HTTP_POST, handleReboot);
+  server.on("/metrics", HTTP_GET, handleMetrics);   // Prometheus (ACL korumalı, login yok)
   server.on("/update", HTTP_GET, []() {
     if (!requireAuth()) return;
     server.send(200, "text/html", buildUpdatePage());
@@ -1181,18 +1452,20 @@ static void startRunServices() {
     []() {                                   // dosya parça parça gelirken çağrılan upload handler'ı
       HTTPUpload &up = server.upload();
       if (up.status == UPLOAD_FILE_START) {
-        g_otaAuthFail = !server.authenticate(cfg.adminUser, cfg.adminPass);
-        if (g_otaAuthFail) { Serial.println(F("[OTA-WEB] Yetkisiz yukleme reddedildi.")); return; }
-        Serial.printf("[OTA-WEB] Yukleme: %s\n", up.filename.c_str());
+        g_otaAuthFail = !authClientOK();
+        if (g_otaAuthFail) { syslogf(SLOG_WARNING, "OTA reddedildi (yetki) src=%s", server.client().remoteIP().toString().c_str()); return; }
+        syslogf(SLOG_NOTICE, "OTA basladi: %s", up.filename.c_str());
         uint32_t maxSketch = (ESP.getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        String md5 = server.arg("md5"); md5.trim();
+        if (md5.length() == 32) Update.setMD5(md5.c_str());   // opsiyonel bütünlük doğrulaması
         if (!Update.begin(maxSketch)) Update.printError(Serial);
       } else if (up.status == UPLOAD_FILE_WRITE) {
         if (g_otaAuthFail) return;
         if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
       } else if (up.status == UPLOAD_FILE_END) {
         if (g_otaAuthFail) return;
-        if (Update.end(true)) Serial.printf("[OTA-WEB] Tamam: %u byte\n", up.totalSize);
-        else Update.printError(Serial);
+        if (Update.end(true)) syslogf(SLOG_NOTICE, "OTA tamam: %u byte", (unsigned)up.totalSize);
+        else { Update.printError(Serial); syslogf(SLOG_ERR, "OTA yazma/dogrulama hatasi"); }
       } else if (up.status == UPLOAD_FILE_ABORTED) {
         Update.end();
         Serial.println(F("[OTA-WEB] Yukleme iptal edildi."));
@@ -1201,8 +1474,10 @@ static void startRunServices() {
     });
 
   server.onNotFound([]() { server.send(404, "text/plain", "404 Not Found"); });
+  server.collectHeaders("Authorization");        // Basic Auth başlığını oku (variadic imza)
   server.begin();
   MDNS.addService("http", "tcp", WEB_PORT);
+  syslogf(SLOG_INFO, "boot up ip=%s host=%s.local", WiFi.localIP().toString().c_str(), hostName().c_str());
 
   Serial.println("[SNMP] Agent hazir. UDP/" + String(SNMP_PORT) +
                  "  community='" + String(cfg.roComm) + "'");
@@ -1219,11 +1494,20 @@ enum SensorState { S_IDLE, S_CONVERTING };
 static SensorState sensorState = S_IDLE;
 static unsigned long convStart = 0, lastConv = 0;
 
+// Durum değişiminde syslog'a yaz (her okumada değil, yalnızca geçişte)
+static void setSensorOper(int32_t v, const char *why) {
+  if (v != g_sensorOper) {
+    if (v == 2)      syslogf(SLOG_WARNING, "sensor fault: %s", why);
+    else if (v == 1) syslogf(SLOG_NOTICE, "sensor recovered");
+  }
+  g_sensorOper = v;
+}
+
 static void serviceSensor() {
   if (sensorState == S_IDLE) {
     if (millis() - lastConv >= SENSOR_INTERVAL) {
       if (ds18b20.startConversion()) { sensorState = S_CONVERTING; convStart = millis(); }
-      else { g_sensorOper = 2; g_errCount++; lastConv = millis(); Serial.println(F("[DS18B20] presence yok")); }
+      else { setSensorOper(2, "presence yok"); g_errCount++; lastConv = millis(); }
     }
   } else { // S_CONVERTING (bloklamadan 750ms bekle)
     if (millis() - convStart >= DS18B20_CONV_MS) {
@@ -1231,11 +1515,11 @@ static void serviceSensor() {
       if (!isnan(t)) {
         g_tempDeci  = (int32_t)lroundf(t * 10.0f);
         g_tempMilli = (int32_t)lroundf(t * 1000.0f);
-        g_sensorOper = 1; g_readCount++;
+        setSensorOper(1, ""); g_readCount++;
         Serial.printf("[DS18B20] %.2f C  (read=%lu err=%lu heap=%u)\n",
                       t, g_readCount, g_errCount, ESP.getFreeHeap());
       } else {
-        g_sensorOper = 2; g_errCount++;
+        setSensorOper(2, "CRC/aralik/hat"); g_errCount++;
         Serial.println(F("[DS18B20] Okuma hatasi (CRC/aralik)."));
       }
       sensorState = S_IDLE; lastConv = millis();
@@ -1248,7 +1532,7 @@ static void serviceSensor() {
 void setup() {
   Serial.begin(115200);
   delay(50);
-  Serial.println(F("\n\n=== netio.probe v2.1 (ESP8266 DS18B20 SNMP) ==="));
+  Serial.println(F("\n\n=== netio.probe v1.2 (ESP8266 DS18B20 SNMP) ==="));
   Serial.println("Chip ID : 0x" + String(ESP.getChipId(), HEX));
   Serial.println("Host    : " + hostName());
   Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " B");
@@ -1301,6 +1585,7 @@ static void checkResetTriggers() {
 
 void loop() {
   yield();
+  ESP.wdtFeed();             // yazılım watchdog'u besle
   checkResetTriggers();
 
   if (g_mode == MODE_PORTAL) {
@@ -1318,6 +1603,16 @@ void loop() {
   server.handleClient();     // şifreli web yönetim arayüzü + web OTA
   snmpHandle();
   serviceSensor();
+
+  // Heap taban koruması: boş heap uzun süre eşik altındaysa kontrollü reboot
+  static unsigned long lowHeapSince = 0;
+  if (ESP.getFreeHeap() < HEAP_FLOOR) {
+    if (lowHeapSince == 0) lowHeapSince = millis();
+    else if (millis() - lowHeapSince > HEAP_FLOOR_MS) {
+      syslogf(SLOG_ERR, "dusuk heap %u -> reboot", (unsigned)ESP.getFreeHeap());
+      delay(50); ESP.restart();
+    }
+  } else lowHeapSince = 0;
 
   // periyodik durum raporu
   static unsigned long lastReport = 0;
