@@ -315,4 +315,4 @@ This firmware is provided **as-is, without warranty**. MIT is a sensible default
 
 ---
 
-<sub>netio.probe · ESP8266 + DS18B20 · SNMP v2c temperature probe firmware (v2.1)</sub>
+<sub>netio.probe · ESP8266 + DS18B20 · SNMP v2c temperature probe firmware (v1.1) - Alptekin Sünnetci</sub>
