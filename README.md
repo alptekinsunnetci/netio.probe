@@ -4,7 +4,7 @@
  
 `netio.probe` turns a NodeMCU (ESP8266) and a single DS18B20 sensor into a proper, monitorable network device. It reads temperature over 1-Wire and publishes it as a **real SNMP v2c agent** (hand-written BER/ASN.1 — `snmpwalk` / `snmpget` work out of the box), exposes a **modern, password-protected web management UI**, supports **browser-based OTA** firmware updates, and ships a **first-boot Wi-Fi captive portal** so it can be provisioned without recompiling.
  
-As of **v1.3** it is also a self-alerting probe: configurable **temperature thresholds with hysteresis** drive an alarm state, an onboard **LED**, and **SNMP v2c traps** pushed to your NMS — on top of the v1.2 security/observability layer (source-IP ACL, salted-hash auth with brute-force lockout, Prometheus `/metrics`, remote syslog).
+It is a self-alerting probe: configurable **temperature thresholds with hysteresis** drive an alarm state, an onboard **LED**, and **SNMP v2c traps** pushed to your NMS. As of **v1.4**, the **hardware pins, pull-up mode, and NTP** are all configurable from the web UI — no recompiling to move the sensor pin or sync the clock — on top of the v1.2 security/observability layer (source-IP ACL, salted-hash auth with brute-force lockout, Prometheus `/metrics`, remote syslog).
  
 Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, DallasTemperature, or crypto libraries required (SHA-256 uses the core's bundled BearSSL).
  
@@ -13,7 +13,7 @@ Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, Da
 ![protocol](https://img.shields.io/badge/SNMP-v2c%20%2B%20traps-success)
 ![metrics](https://img.shields.io/badge/metrics-Prometheus-orange)
 ![libraries](https://img.shields.io/badge/external%20libs-none-brightgreen)
-![version](https://img.shields.io/badge/firmware-v1.3-informational)
+![version](https://img.shields.io/badge/firmware-v1.4-informational)
  
 ---
  
@@ -27,6 +27,7 @@ Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, Da
 - [Upgrading](#upgrading)
 - [First-time setup (Wi-Fi captive portal)](#first-time-setup-wi-fi-captive-portal)
 - [Web management interface](#web-management-interface)
+- [Hardware & NTP configuration](#hardware--ntp-configuration)
 - [Temperature alarms & SNMP traps](#temperature-alarms--snmp-traps)
 - [Access control (ACL)](#access-control-acl)
 - [Monitoring & integration](#monitoring--integration)
@@ -42,29 +43,32 @@ Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, Da
  
 ## What's new
  
+### v1.4 — runtime hardware configuration & NTP
+ 
+- **Configurable GPIO from the UI.** The **DS18B20 data pin**, the **internal/external pull-up** mode, and the **alarm LED/relay pin** are now runtime settings under **Hardware & NTP** — no recompiling to re-wire. The compile-time `#define`s are just the defaults. Pin/pull-up changes reboot the device so the 1-Wire bus re-initialises cleanly.
+- **NTP time sync.** Set an NTP server (default `pool.ntp.org`, blank to disable). Once synced, **syslog messages carry a real RFC 5424 UTC timestamp** instead of the NILVALUE `-`, and the dashboard shows a live **UTC clock**.
+- **Migration chain extended** — flashing v1.4 over **v1.1, v1.2, or v1.3** preserves settings.
 ### v1.3 — threshold-based alerting
  
-- **Temperature thresholds + hysteresis.** Set a high and a low threshold (in °C) and a hysteresis band. The device tracks an **alarm state** (normal / high / low); hysteresis prevents flapping around the setpoint (a high alarm only clears once the temperature drops below `high − hysteresis`).
-- **SNMP v2c traps.** On every alarm transition the device pushes an `SNMPv2-Trap-PDU` to a configurable target (`IP:162`). Traps carry `sysUpTime.0`, `snmpTrapOID.0`, the current temperature, and the alarm state. Built with the same hand-written BER encoder — still no libraries.
-- **Onboard LED alarm indicator** (active-LOW; re-assignable to a relay via `ALARM_LED_PIN`).
-- **Alarm visibility everywhere** — a colour-coded banner on the dashboard, a `netio_alarm_state` Prometheus gauge, and new enterprise OIDs for alarm state and the thresholds.
-- **Test-trap button** (`/testtrap`) to validate your trap destination/community instantly, without waiting for a real threshold crossing.
-- **Migration chain extended** — flashing v1.3 over **either v1.1 or v1.2** preserves settings.
+- **Temperature thresholds + hysteresis** drive an alarm state (normal / high / low); hysteresis prevents flapping around the setpoint.
+- **SNMP v2c traps** pushed to a configurable target (`IP:162`) on every alarm transition, carrying `sysUpTime.0`, `snmpTrapOID.0`, the temperature, and the alarm state.
+- Onboard **LED alarm indicator**, a dashboard alarm banner, a `netio_alarm_state` metric, enterprise OIDs for alarm state and thresholds, and a **Test-trap** button (`/testtrap`).
 ### v1.2 — security, observability & reliability (recap)
  
 - Admin password stored as **salt + SHA-256** (never plaintext); **per-IP brute-force lockout**.
 - **Source-IP ACL (CIDR)** on SNMP, the web UI, and `/metrics`.
 - **Prometheus `/metrics`** endpoint and **remote syslog** (RFC 5424 / UDP) for boot, config, OTA, sensor-fault, and **auth-failure** events.
-- DS18B20 stuck-bus detection; **seamless EEPROM migration**; **watchdog + low-heap self-heal**; optional **MD5 verification** for web OTA; admin-password field no longer pre-filled.
+- DS18B20 stuck-bus detection; **seamless EEPROM migration**; **watchdog + low-heap self-heal**; optional **MD5 verification** for web OTA.
 ---
  
 ## Features
  
-- **Real SNMP v2c agent** — hand-written BER/ASN.1 encoder/decoder. Supports `GET`, `GETNEXT`, and `GETBULK` (single-repetition), so `snmpwalk` and `snmpbulkwalk` terminate correctly. Read-only; the configured community is validated, and packets from outside the ACL or with a wrong community are dropped silently.
+- **Real SNMP v2c agent** — hand-written BER/ASN.1 encoder/decoder. Supports `GET`, `GETNEXT`, and `GETBULK` (single-repetition), so `snmpwalk` and `snmpbulkwalk` terminate correctly. Read-only; community is validated, and packets from outside the ACL or with a wrong community are dropped silently.
 - **Threshold alarms + SNMP traps** — high/low thresholds with hysteresis, an alarm state machine, an LED indicator, and pushed `SNMPv2-Trap` notifications.
+- **Runtime hardware config** — sensor pin, pull-up mode, and alarm-output pin set from the UI; **NTP** clock sync with UTC syslog timestamps.
 - **Standards-aligned MIB** — full SNMPv2-MIB *System* group plus the **Entity Sensor MIB** (RFC 3433) for the temperature reading, plus an enterprise subtree with diagnostics (heap, RSSI, uptime, counters, alarm state, thresholds).
 - **Prometheus `/metrics`** — telemetry plus alarm state in a format your monitoring stack scrapes directly.
-- **Remote syslog** — security and operational events to a central collector (VictoriaLogs, ClickHouse, rsyslog, …).
+- **Remote syslog** — security and operational events to a central collector (VictoriaLogs, ClickHouse, rsyslog, …), with UTC timestamps when NTP is enabled.
 - **Hardened web UI** — HTTP Basic Auth backed by a **salted SHA-256** secret, **per-IP brute-force lockout**, and an optional **source-IP ACL**.
 - **Robust DS18B20 driver** — standard 1-Wire timing with interrupts disabled only around the short reset/bit windows, a **non-blocking** conversion state machine, CRC8 validation, and stuck-bus detection.
 - **First-boot Wi-Fi provisioning** — boots as an Access Point with a captive portal; pick your network from a live scan.
@@ -78,7 +82,7 @@ Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, Da
 ```
 power on
   └─► load config from EEPROM (magic + XOR checksum)
-        │     • if a v1.1 or v1.2 layout is found, MIGRATE it (settings preserved)
+        │     • if a v1.1 / v1.2 / v1.3 layout is found, MIGRATE it (settings preserved)
         │
         ├─ configured AND Wi-Fi connects within 20 s ─► RUN MODE
         │     • SNMP agent            UDP/161   (ACL-filtered)
@@ -87,6 +91,7 @@ power on
         │     • Prometheus metrics    /metrics  (ACL, no login)
         │     • Web OTA               /update   (auth + optional MD5)
         │     • IDE OTA (espota)      + mDNS
+        │     • NTP sync              → UTC syslog timestamps
         │     • Remote syslog         UDP/514   (events)
         │     • Alarm LED             on threshold breach
         │
@@ -117,18 +122,20 @@ In RUN mode, if Wi-Fi stays down for more than 120 seconds the device reboots an
 |---------|-------------------|
 | VDD | 3V3 |
 | GND | GND |
-| DATA | **GPIO4 (D2)** |
+| DATA | **GPIO4 (D2)** — default; changeable in the UI |
  
-> ⚠️ **An external 4.7 kΩ pull-up between DATA and 3V3 is required.** The ESP8266's internal pull-up (~30 kΩ+) is too weak for reliable 1-Wire timing, especially with Wi-Fi active. If you absolutely must rely on the internal pull-up, set `USE_INTERNAL_PULLUP` to `1` in the sketch — but this is **not recommended**.
+> ⚠️ **An external 4.7 kΩ pull-up between DATA and 3V3 is strongly recommended.** The ESP8266's internal pull-up (~30 kΩ+) is too weak for reliable 1-Wire timing, especially with Wi-Fi active. The internal pull-up can now be toggled from the UI (**Hardware & NTP → internal pull-up**) if you have no external resistor, but it is **not recommended**.
  
 ### Alarm output & factory-reset header
  
 | Function | Pin |
 |----------|-----|
-| Alarm indicator | **`LED_BUILTIN`** (active-LOW) — re-assign via `ALARM_LED_PIN` for a relay/buzzer |
+| Alarm indicator | **`LED_BUILTIN`** by default (active-LOW) — re-assign to any GPIO in the UI for a relay/buzzer |
 | Factory reset jumper | **GPIO14 (D5) ↔ GND** (short ~2 s) |
  
 The alarm LED lights while the device is in a high or low temperature alarm. Shorting D5 to GND for ~2 seconds — at boot or at runtime — wipes all settings; the onboard FLASH button (GPIO0) held for 3 s does the same.
+ 
+> **Safe data-pin choices:** GPIO **4, 5, 12, 13, 14**. Avoid GPIO0/2/15 (boot-strapping) and GPIO16 for 1-Wire.
  
 ---
  
@@ -142,7 +149,7 @@ The alarm LED lights while the device is in a high or low temperature alarm. Sho
   https://arduino.esp8266.com/stable/package_esp8266com_index.json
   ```
 - Board: **NodeMCU 1.0 (ESP-12E Module)**
-- **No libraries to install** — everything used is part of the core (`ESP8266WiFi`, `ESP8266WebServer`, `DNSServer`, `ESP8266mDNS`, `WiFiUdp`, `ArduinoOTA`, `EEPROM`, `Updater`, and BearSSL for SHA-256).
+- **No libraries to install** — everything used is part of the core (`ESP8266WiFi`, `ESP8266WebServer`, `DNSServer`, `ESP8266mDNS`, `WiFiUdp`, `ArduinoOTA`, `EEPROM`, `Updater`, the SNTP/`time.h` facility, and BearSSL for SHA-256).
 ### ⚠️ One sketch = one folder
  
 The Arduino build concatenates **every `.ino` file in the sketch folder** into a single program. Keep exactly one `.ino`, and its name must match the folder:
@@ -166,11 +173,11 @@ If you see a wall of `redefinition of '...'` / `multiple definition of '...'` er
  
 ## Upgrading
  
-Just flash the new firmware over the old one (USB or OTA). On the first boot it detects the older EEPROM layout and **migrates it automatically** — both **v1.1 → v1.3** and **v1.2 → v1.3** are supported:
+Just flash the new firmware over the old one (USB or OTA). On the first boot it detects the older EEPROM layout and **migrates it automatically** — **v1.1 → v1.4**, **v1.2 → v1.4**, and **v1.3 → v1.4** are all supported:
  
-- Wi-Fi credentials, SNMP read community, `sysName` / `sysLocation` / `sysContact`, OTA password, admin username, and (from v1.2) the ACL and syslog settings are **preserved**.
-- From **v1.2**, the salted password hash is carried over as-is (nothing to re-enter). From **v1.1**, the old plaintext password is re-hashed into the new salted form.
-- New v1.3 settings (thresholds, trap target) start **disabled / default**, so behaviour is unchanged until you configure them.
+- Wi-Fi credentials, SNMP read community, `sysName` / `sysLocation` / `sysContact`, OTA password, admin username, the ACL/syslog settings, and (from v1.3) the thresholds and trap target are **preserved**.
+- From **v1.2/v1.3**, the salted password hash is carried over as-is (nothing to re-enter). From **v1.1**, the old plaintext password is re-hashed into the new salted form.
+- New v1.4 settings (sensor pin, pull-up mode, alarm-LED pin, NTP server) start at their **defaults**, so behaviour is unchanged until you adjust them.
 No factory reset and no re-provisioning are needed. (A factory reset is still available if you *want* a clean slate.)
  
 ---
@@ -189,7 +196,7 @@ On first boot (or after a factory reset) the device starts an Access Point:
 2. The page performs a **live Wi-Fi scan** — tap your network, enter the password.
 3. Optionally expand **Advanced** to set the SNMP read community, `sysName`/`sysLocation`/`sysContact`, OTA password, and admin credentials.
 4. **Save** → the device reboots and joins your network.
-After connecting it is reachable at `http://netio-probe-<chip-id>.local/` (mDNS) or by its DHCP IP. Configure thresholds and traps from the management UI once it's online.
+After connecting it is reachable at `http://netio-probe-<chip-id>.local/` (mDNS) or by its DHCP IP. Configure thresholds, traps, hardware pins, and NTP from the management UI once it's online.
  
 ---
  
@@ -204,23 +211,43 @@ Once on your network, browse to the device IP (or `netio-probe-<chip-id>.local`)
  
 > 🔐 **Change these on first login.** The password is stored only as a salted hash. Leaving a password field blank keeps the current one.
  
-The dashboard shows live telemetry (temperature, RSSI, uptime, free heap, SNMP request count, read/error counters) plus a **colour-coded alarm banner**, refreshed every few seconds via a `/status` JSON endpoint, and lets you:
+The dashboard shows live telemetry (temperature, RSSI, uptime, free heap, SNMP request count, read/error counters), a **colour-coded alarm banner**, and a **UTC clock** (when NTP is synced), refreshed every few seconds via a `/status` JSON endpoint. It lets you:
  
 - edit the **SNMP read community** (applied live) and `sysName` / `sysLocation` / `sysContact`;
 - configure **temperature thresholds, hysteresis, and the SNMP trap target/community** (with a **Test trap** button);
 - set the **access-control CIDR**, **syslog server IP**, and **syslog port**;
-- change **admin** credentials, the **OTA** (espota) password, and **Wi-Fi** credentials (changing Wi-Fi triggers a reboot);
+- set the **DS18B20 data pin, pull-up mode, alarm-LED pin, and NTP server** (**Hardware & NTP**);
+- change **admin** credentials, the **OTA** (espota) password, and **Wi-Fi** credentials;
 - open the **firmware update** page; **reboot** or **factory reset**.
+Changing **Wi-Fi credentials or any hardware pin / pull-up** triggers an automatic reboot; everything else applies live.
+ 
 | Endpoint | Method | Auth | Purpose |
 |----------|--------|------|---------|
 | `/` | GET | ✅ Basic + ACL | Management dashboard |
-| `/status` | GET | ✅ Basic + ACL | Live telemetry + alarm (JSON) |
+| `/status` | GET | ✅ Basic + ACL | Live telemetry + alarm + clock (JSON) |
 | `/save` | POST | ✅ Basic + ACL | Apply settings |
 | `/testtrap` | POST | ✅ Basic + ACL | Send a test SNMP trap |
 | `/update` | GET / POST | ✅ Basic + ACL | Web OTA page / upload |
 | `/reboot` | POST | ✅ Basic + ACL | Restart |
 | `/reset` | POST | ✅ Basic + ACL | Factory reset |
 | `/metrics` | GET | 🔓 ACL only | Prometheus metrics |
+ 
+---
+ 
+## Hardware & NTP configuration
+ 
+Set under **Hardware & NTP** in the management UI.
+ 
+| Setting | Default | Notes |
+|---------|---------|-------|
+| **DS18B20 data pin** | `GPIO4` | safe choices: 4, 5, 12, 13, 14 — **reboots on change** |
+| **Internal pull-up** | off (external) | enable only if you have no external 4.7 kΩ — **reboots on change** |
+| **Alarm LED / relay pin** | `LED_BUILTIN` | any output GPIO (active-LOW) — **reboots on change** |
+| **NTP server** | `pool.ntp.org` | blank disables NTP; applied live |
+ 
+Because the 1-Wire driver re-initialises the bus from scratch, a pin or pull-up change restarts the device (the UI shows a "rebooting" page and returns automatically). The NTP server can be changed without a reboot.
+ 
+**NTP behaviour:** the device syncs in UTC. The first sync takes a few seconds after boot; until then, syslog timestamps fall back to the RFC 5424 NILVALUE (`-`) and the dashboard clock is hidden. Once synced, syslog lines carry a UTC timestamp (`…T…Z`) and the dashboard shows the live UTC time.
  
 ---
  
@@ -237,7 +264,7 @@ Configure these under **Alarm & TRAP** in the management UI.
 | **Low threshold (°C)** | alarm goes *low* when temperature ≤ this value |
 | **Hysteresis (°C)** | the alarm only clears once temperature is `hysteresis` past the threshold (back inside the safe band) |
  
-The alarm state is `normal` (0), `high` (1), or `low` (2). It is evaluated only while the sensor reads OK, so a sensor fault won't produce a bogus alarm. While in alarm, the onboard LED lights and the dashboard shows a banner.
+The alarm state is `normal` (0), `high` (1), or `low` (2). It is evaluated only while the sensor reads OK, so a sensor fault won't produce a bogus alarm. While in alarm, the alarm LED lights and the dashboard shows a banner.
  
 > **Example:** high = `30.0`, hysteresis = `0.5`. The alarm raises at ≥ 30.0 °C and clears at < 29.5 °C — so a reading hovering at 30.0 °C won't rapidly toggle.
  
@@ -289,7 +316,7 @@ The ACL restricts **who** can reach the device, by source IP, expressed as a sin
 | `192.168.10.0/24` | only the `192.168.10.x` management subnet |
 | `10.0.5.20/32` | only a single host (e.g. your NMS / Prometheus server) |
  
-> The ACL is an IP filter, not a substitute for encryption. Outbound traps are sent regardless of the ACL (the ACL governs *inbound* access).
+> The ACL is an IP filter, not a substitute for encryption. Outbound traps and syslog are sent regardless of the ACL (the ACL governs *inbound* access).
  
 ---
  
@@ -324,7 +351,7 @@ Exposed series:
  
 ### Syslog (RFC 5424 / UDP)
  
-Set a **syslog server IP** (and optionally a port; default `514`) to stream events using facility `local0`. Logged events include:
+Set a **syslog server IP** (and optionally a port; default `514`) to stream events using facility `local0`. With **NTP enabled**, each message carries a UTC timestamp; otherwise the RFC 5424 NILVALUE `-` is sent and the collector's receive-time applies. Logged events include:
  
 - `boot up ip=… host=….local`
 - `config saved`
@@ -334,13 +361,13 @@ Set a **syslog server IP** (and optionally a port; default `514`) to stream even
 - `test trap gonderildi -> …`
 - `web auth fail src=… user=…` / `web ACL deny src=…`
 - `dusuk heap … -> reboot`
-Example line (a failed login):
+Example line (a failed login, NTP synced):
  
 ```
-<132>1 - netio-probe-abcd netio.probe - - - web auth fail src=192.168.10.50 user=admin
+<132>1 2026-06-04T12:00:01Z netio-probe-abcd netio.probe - - - web auth fail src=192.168.10.50 user=admin
 ```
  
-> **Blue-team tip:** the `web auth fail`, `web ACL deny`, and `temp alarm` events are clean signals for a detection/alerting rule — forward them into your SIEM and alert on bursts or critical transitions. (Timestamps are sent as the RFC 5424 NILVALUE `-`; your collector's receive-time is authoritative. NTP-based timestamps are on the roadmap.)
+> **Blue-team tip:** the `web auth fail`, `web ACL deny`, and `temp alarm` events are clean signals for a detection/alerting rule — forward them into your SIEM and alert on bursts or critical transitions.
  
 ---
  
@@ -362,7 +389,7 @@ After the first USB flash, the board also advertises itself for over-the-air upl
  
 ## Factory reset
  
-Any of the following wipes **all** settings (Wi-Fi, communities, admin password, ACL, syslog, thresholds, trap target, …) and returns the device to the setup AP:
+Any of the following wipes **all** settings (Wi-Fi, communities, admin password, ACL, syslog, thresholds, trap target, hardware pins, NTP, …) and returns the device to the setup AP:
  
 1. **Web UI** — the *Factory reset* button (with confirmation).
 2. **Hardware jumper** — short **GPIO14 (D5) ↔ GND** for ~2 seconds.
@@ -449,13 +476,14 @@ snmpget   -v2c -c public <IP> .1.3.6.1.4.1.63333.10.8.0
  
 ## Configuration & defaults
  
-Compile-time constants live at the top of the sketch; runtime settings are stored in EEPROM and editable via the portal / web UI.
+Compile-time constants live at the top of the sketch and serve as **defaults**; runtime settings are stored in EEPROM and editable via the portal / web UI.
  
 | Setting | Default | Notes |
 |---------|---------|-------|
-| DS18B20 data pin | `GPIO4` (D2) | `DS18B20_PIN` |
-| Alarm LED pin | `LED_BUILTIN` | `ALARM_LED_PIN` (active-LOW); set to a relay GPIO if desired |
-| Internal pull-up | off | `USE_INTERNAL_PULLUP` (use an external 4.7 kΩ) |
+| DS18B20 data pin | `GPIO4` (D2) | runtime (UI); `DS18B20_PIN` is the default |
+| Internal pull-up | off (external) | runtime (UI); `USE_INTERNAL_PULLUP` is the default |
+| Alarm LED / relay pin | `LED_BUILTIN` | runtime (UI), active-LOW; `ALARM_LED_PIN` is the default |
+| NTP server | `pool.ntp.org` | runtime (UI); blank disables NTP |
 | SNMP port | `161` | UDP |
 | SNMP trap port | `162` | UDP (outbound) |
 | Web port | `80` | TCP |
@@ -485,32 +513,32 @@ Compile-time constants live at the top of the sketch; runtime settings are store
  
 ## Security considerations
  
-v1.3 keeps v1.2's hardening; be clear about what it does and does not protect:
+Be clear about what the device does and does not protect:
  
 - **Admin password at rest is safe.** Stored only as a random-salt + SHA-256 hash and compared in constant time — never written as plaintext, never pre-filled into a web page.
 - **Online password guessing is throttled.** Five failed logins from an IP lock that IP out for a minute (`429`).
 - **Reachability is controllable.** The source-IP ACL limits inbound SNMP and HTTP/metrics to a subnet or host you choose.
-- **Transport is still cleartext.** SNMP v2c (including traps) and HTTP Basic Auth are **not encrypted**: the community string and the base64-encoded credentials are visible to anyone who can sniff the segment. Run the device on a **trusted/management VLAN**, and for browser access prefer a **TLS-terminating reverse proxy** in front of it.
+- **Transport is still cleartext.** SNMP v2c (including traps) and HTTP Basic Auth are **not encrypted**: the community string and the base64-encoded credentials are visible to anyone who can sniff the segment. Run the device on a **trusted/management VLAN**, and for browser access prefer a **TLS-terminating reverse proxy** in front of it. (Encrypted, authenticated SNMPv3 is on the roadmap.)
 - **OTA is a powerful capability.** Web OTA requires authentication and supports an optional MD5 integrity check, but it can replace the firmware — keep it behind the ACL and your network controls. For cryptographically signed updates, use the ESP8266 core's signed-OTA toolchain.
-- **For zero-trust environments,** SNMPv3 (auth + priv) and HTTPS are the right answer; this firmware targets SNMP v2c and is intended for monitored, trusted networks.
+- **NTP is unauthenticated.** Timestamps are for log correlation, not a security control; SNTP responses are trusted as received.
 ---
  
 ## Limitations & roadmap
  
 **Current limitations**
  
-- SNMP is **read-only** (no `SET`) and **v2c only** (no v3).
+- SNMP is **read-only** (no `SET`) and **v2c only** (no v3 yet).
 - `GETBULK` is handled as a single repetition (protocol-legal; walks still complete).
 - Traps are **v2c `Trap`** (fire-and-forget UDP), not acknowledged `INFORM`.
 - One DS18B20 per device (Skip ROM addressing); multi-sensor 1-Wire enumeration is not implemented.
-- Syslog/trap timestamps rely on the collector's receive-time (device sends NILVALUE).
-**Roadmap (not in v1.3)**
+**Roadmap (not in v1.4)**
  
-- **SNMPv3** (USM, SHA + AES) and/or `INFORM` traps.
+- **SNMPv3** (USM: HMAC-SHA auth + AES-128 privacy, engine discovery, time-window) — the next planned release.
+- `INFORM` (acknowledged) traps.
 - **MQTT** publishing (Telegraf / Home Assistant).
-- **NTP** time sync for real event timestamps.
 - **Multi-sensor** 1-Wire enumeration and optional SHT3x humidity.
-- Configurable GPIO / PEN from the UI.
+- Configurable PEN from the UI.
 ---
  
-<sub>netio.probe · ESP8266 + DS18B20 · SNMP v2c temperature probe firmware (v1.3)</sub>
+<sub>netio.probe · ESP8266 + DS18B20 · SNMP v2c temperature probe firmware (v1.4)</sub>
+ 
