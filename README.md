@@ -14,6 +14,10 @@ Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, Da
 ![metrics](https://img.shields.io/badge/metrics-Prometheus-orange)
 ![libraries](https://img.shields.io/badge/external%20libs-none-brightgreen)
 ![version](https://img.shields.io/badge/firmware-v1.4-informational)
+
+---
+
+![Web UI](Screenshot.png)
  
 ---
  
