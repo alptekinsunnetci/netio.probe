@@ -1,5 +1,5 @@
 /* =====================================================================================
- *  netio.probe — ESP8266 NodeMCU DS18B20 SNMP v2c Agent  (v1.4)  Alptekin Sünnetci   *
+ *  netio.probe — ESP8266 NodeMCU DS18B20 SNMP v2c Agent  (v1.5)  Alptekin Sünnetci   *
  * =====================================================================================
  *
  *  Bu firmware, ESP8266 (NodeMCU) üzerinde DS18B20'den sıcaklık okur ve bu değeri
@@ -78,6 +78,7 @@
  *    - Alarm + eşikler: yeni enterprise OID'ler (.10.8/.9/.10), /metrics gauge ve panelde uyarı şeridi.
  *    - "Test trap" düğmesi (/testtrap) ile TRAP yapılandırmasını anında doğrulama.
  *    - EEPROM migrasyon zinciri: v1.2 VE v1.1 -> v1.3 (ayarlar korunur).
+ *    SONRAKİ ADIMLAR (bu sürümde YOK): SNMPv3, MQTT, NTP, çoklu sensör/SHT3x.
  *
  *  v1.4 YENİLİKLER (çalışma-anı donanım yapılandırması + zaman):
  *    - DS18B20 veri pini, dahili/harici pull-up ve alarm LED/röle pini artık UI'dan ayarlanır.
@@ -85,6 +86,14 @@
  *    - NTP: yapılandırılabilir sunucu; syslog artık UTC RFC 5424 zaman damgası taşır.
  *    - Panelde canlı UTC saat göstergesi (/status'a ntp epoch alanı eklendi).
  *    - EEPROM migrasyon zinciri: v1.3 / v1.2 / v1.1 -> v1.4 (ayarlar korunur).
+ *
+ *  v1.5 YENİLİKLER (web arayüzü yeniden tasarımı):
+ *    - Tüm web sayfaları açık (light) temaya geçti; geniş, ferah "enstrüman" estetiği.
+ *    - Yönetim paneli sekmeli (tab) yapıya kavuştu: Dashboard | SNMP | Güvenlik | WiFi |
+ *      Alarm | TRAP | Donanım | NTP. Dashboard salt-izleme (telemetri kutucukları + sistem
+ *      işlemleri); ayarlar sekmelere bölündü, tek formda tek "Ayarları kaydet".
+ *    - Alarm şeridi ve UTC saat tüm sekmelerde görünür kalır.
+ *    - Yalnızca arayüz değişti: config yapısı v1.4 ile AYNI (CFG_MAGIC değişmedi, migrasyon yok).
  *
  *  Derleme: Arduino IDE / arduino-cli, Board = "NodeMCU 1.0 (ESP-12E Module)",
  *           ESP8266 Arduino Core 3.x. Harici kütüphane GEREKMEZ (hepsi core içinde).
@@ -695,7 +704,7 @@ static const MibNode MIB[] = {
 };
 static const int MIB_COUNT = sizeof(MIB) / sizeof(MIB[0]);
 
-static const char *SYS_DESCR = "netio.probe v1.4 - ESP8266 DS18B20 SNMP agent";
+static const char *SYS_DESCR = "netio.probe v1.5 - ESP8266 DS18B20 SNMP agent";
 
 // Yanıt için statik tamponlar (tek thread, loop içinde sıralı kullanım)
 static uint8_t S_VB[600];
@@ -1048,69 +1057,65 @@ static String buildPortalPage() {
   p += F("<!DOCTYPE html><html lang='tr'><head><meta charset='utf-8'>"
          "<meta name='viewport' content='width=device-width,initial-scale=1'>"
          "<title>netio.probe · kurulum</title><style>"
-         ":root{--ink:#e6edf6;--dim:#7f8ea8;--accent:#2ee6c4;--line:rgba(127,142,168,.16);"
-         "--mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace}"
+         ":root{--ink:#10202f;--muted:#5b6b80;--faint:#93a1b3;--accent:#0e9488;--accent-d:#0b7d72;--accent-soft:#e4f5f2;"
+         "--line:#e4eaf1;--field:#f7fafc;--mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;"
+         "--sans:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}"
          "*{box-sizing:border-box}html,body{margin:0;min-height:100%}"
-         "body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:var(--ink);"
-         "display:flex;align-items:center;justify-content:center;padding:20px;position:relative;overflow-x:hidden;"
-         "background:#06080f radial-gradient(820px 460px at 50% -8%,rgba(46,230,196,.12),transparent 62%) no-repeat}"
-         "body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;"
-         "background:linear-gradient(rgba(127,142,168,.05) 1px,transparent 1px) 0 0/100% 30px,"
-         "linear-gradient(90deg,rgba(127,142,168,.05) 1px,transparent 1px) 0 0/30px 100%;"
-         "-webkit-mask:radial-gradient(680px 420px at 50% 8%,#000,transparent 78%);"
-         "mask:radial-gradient(680px 420px at 50% 8%,#000,transparent 78%)}"
-         ".card{position:relative;z-index:1;width:100%;max-width:440px;background:rgba(15,21,35,.72);"
-         "-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border:1px solid var(--line);"
-         "border-radius:18px;padding:24px 22px 22px;"
-         "box-shadow:0 30px 80px -30px rgba(0,0,0,.85),inset 0 0 0 1px rgba(46,230,196,.04)}"
+         "body{font-family:var(--sans);color:var(--ink);display:flex;align-items:center;justify-content:center;padding:24px 18px;position:relative;overflow-x:hidden;"
+         "background:radial-gradient(900px 520px at 50% -12%,rgba(14,148,136,.10),transparent 60%),radial-gradient(700px 420px at 100% 0,rgba(37,99,235,.06),transparent 55%),#e8eef4;background-attachment:fixed}"
+         "body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;opacity:.5;"
+         "background-image:radial-gradient(rgba(16,32,47,.05) 1px,transparent 1.4px);background-size:22px 22px;"
+         "-webkit-mask:radial-gradient(620px 460px at 50% 6%,#000,transparent 80%);mask:radial-gradient(620px 460px at 50% 6%,#000,transparent 80%)}"
+         ".card{position:relative;z-index:1;width:100%;max-width:460px;background:#fff;border:1px solid var(--line);"
+         "border-radius:22px;padding:28px 28px 24px;box-shadow:0 1px 2px rgba(16,32,47,.04),0 18px 50px -22px rgba(16,32,47,.22)}"
          "@keyframes rise{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}"
          ".card>*{animation:rise .5s both}"
          ".card>*:nth-child(2){animation-delay:.04s}.card>*:nth-child(3){animation-delay:.08s}"
          ".card>*:nth-child(4){animation-delay:.12s}.card>*:nth-child(5){animation-delay:.16s}"
-         ".hd{display:flex;align-items:center;gap:10px;margin:0 0 4px}"
-         ".dot{width:9px;height:9px;border-radius:50%;background:var(--accent);animation:pulse 2.2s infinite}"
-         "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(46,230,196,.55)}70%{box-shadow:0 0 0 9px rgba(46,230,196,0)}100%{box-shadow:0 0 0 0 rgba(46,230,196,0)}}"
-         ".wm{font:700 19px/1 var(--mono);letter-spacing:.3px}.wm b{color:var(--accent)}"
-         ".tag{font:600 10px/1 var(--mono);letter-spacing:2.4px;text-transform:uppercase;color:var(--dim);margin:0 0 18px}"
+         ".hd{display:flex;align-items:center;gap:11px;margin:0 0 4px}"
+         ".dot{width:9px;height:9px;border-radius:50%;background:var(--accent);animation:pulse 2.4s infinite}"
+         "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(14,148,136,.45)}70%{box-shadow:0 0 0 8px rgba(14,148,136,0)}100%{box-shadow:0 0 0 0 rgba(14,148,136,0)}}"
+         ".wm{font:700 20px/1 var(--mono);letter-spacing:-.2px}.wm b{color:var(--accent)}"
+         ".tag{font:600 10.5px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--faint);margin:0 0 20px}"
          ".sec{display:flex;align-items:center;justify-content:space-between;margin:0 0 8px}"
-         ".lbl{display:block;font:600 10.5px/1 var(--mono);letter-spacing:1.4px;text-transform:uppercase;color:var(--dim);margin:14px 0 6px}"
+         ".lbl{display:block;font:600 10px/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:14px 0 6px}"
          ".sec .lbl{margin:0}"
-         ".resc{background:transparent;border:1px solid var(--line);color:var(--dim);border-radius:9px;"
-         "padding:6px 10px;font:600 11px/1 var(--mono);letter-spacing:.5px;cursor:pointer;transition:.15s}"
-         ".resc:hover{color:var(--ink);border-color:var(--accent)}"
-         ".nets{border:1px solid var(--line);border-radius:12px;overflow:hidden auto;max-height:212px;background:rgba(8,12,22,.5)}"
+         ".resc{background:#fff;border:1px solid var(--line);color:var(--muted);border-radius:9px;"
+         "padding:6px 10px;font:600 11px/1 var(--mono);letter-spacing:.04em;cursor:pointer;transition:.15s}"
+         ".resc:hover{color:var(--accent-d);border-color:var(--accent);background:var(--accent-soft)}"
+         ".nets{border:1px solid var(--line);border-radius:13px;overflow:hidden auto;max-height:212px;background:var(--field)}"
          ".net{display:flex;width:100%;align-items:center;justify-content:space-between;gap:10px;padding:11px 13px;"
          "background:transparent;border:0;border-bottom:1px solid var(--line);color:var(--ink);"
          "font:13px/1 var(--mono);cursor:pointer;text-align:left;transition:background .12s}"
-         ".net:last-child{border-bottom:0}.net:hover{background:rgba(46,230,196,.06)}"
-         ".net.sel{background:rgba(46,230,196,.10);box-shadow:inset 2px 0 0 var(--accent)}"
+         ".net:last-child{border-bottom:0}.net:hover{background:var(--accent-soft)}"
+         ".net.sel{background:var(--accent-soft);box-shadow:inset 2px 0 0 var(--accent)}"
          ".nm{display:flex;align-items:center;gap:8px;min-width:0}"
          ".nm .t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}"
-         ".lk{color:var(--dim);flex:0 0 auto}"
+         ".lk{color:var(--faint);flex:0 0 auto}"
          ".rt{display:flex;align-items:center;gap:10px;flex:0 0 auto}"
-         ".rt em{font-style:normal;color:var(--dim);font-size:11px;min-width:56px;text-align:right}"
+         ".rt em{font-style:normal;color:var(--faint);font-size:11px;min-width:56px;text-align:right}"
          ".sig{display:inline-flex;align-items:flex-end;gap:2px;height:14px}"
-         ".sig i{width:3px;border-radius:1px;background:var(--dim)}"
-         ".sig i.on{background:var(--accent);box-shadow:0 0 6px rgba(46,230,196,.5)}"
-         ".scan,.empty{padding:16px 13px;color:var(--dim);font:13px var(--mono);display:flex;align-items:center;gap:10px}"
+         ".sig i{width:3px;border-radius:1px;background:#cbd6e2}"
+         ".sig i.on{background:var(--accent)}"
+         ".scan,.empty{padding:16px 13px;color:var(--muted);font:13px var(--mono);display:flex;align-items:center;gap:10px}"
          ".sp{width:13px;height:13px;border:2px solid var(--line);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex:0 0 auto}"
          "@keyframes spin{to{transform:rotate(360deg)}}"
-         ".f{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:rgba(8,12,22,.7);"
+         ".f{width:100%;padding:11px 13px;border-radius:11px;border:1px solid var(--line);background:#fff;"
          "color:var(--ink);font:14px var(--mono);outline:none;transition:border-color .15s,box-shadow .15s}"
-         ".f:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(46,230,196,.16)}"
-         ".pw{position:relative}.pw .f{padding-right:64px}"
-         ".pw button{position:absolute;right:5px;top:50%;transform:translateY(-50%);background:transparent;border:0;"
-         "color:var(--dim);font:600 11px var(--mono);letter-spacing:.5px;cursor:pointer;padding:7px 9px}"
-         ".pw button:hover{color:var(--accent)}"
-         "details{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}"
-         "summary{cursor:pointer;color:var(--accent);font:600 11px var(--mono);letter-spacing:1.2px;text-transform:uppercase;list-style:none}"
-         "summary::-webkit-details-marker{display:none}summary::before{content:'+ ';color:var(--dim)}"
+         ".f:focus{border-color:var(--accent);box-shadow:0 0 0 3.5px var(--accent-soft)}"
+         ".pw{position:relative}.pw .f{padding-right:70px}"
+         ".pw button{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:transparent;border:0;"
+         "color:var(--accent-d);font:600 11px var(--mono);cursor:pointer;padding:7px 9px;border-radius:7px}"
+         ".pw button:hover{background:var(--accent-soft)}"
+         "details{margin-top:16px;border-top:1px solid var(--line);padding-top:14px}"
+         "summary{cursor:pointer;color:var(--accent-d);font:600 11px var(--mono);letter-spacing:.1em;text-transform:uppercase;list-style:none}"
+         "summary::-webkit-details-marker{display:none}summary::before{content:'+ ';color:var(--faint)}"
          "details[open] summary::before{content:'– '}"
-         ".go{width:100%;margin-top:18px;padding:13px 16px;border:0;border-radius:11px;cursor:pointer;"
-         "font:700 15px/1 system-ui;letter-spacing:.3px;color:#04140f;background:linear-gradient(180deg,#3df0d0,#19c7a8);"
-         "box-shadow:0 10px 26px -10px rgba(46,230,196,.65),inset 0 1px 0 rgba(255,255,255,.4);transition:transform .15s,box-shadow .15s}"
-         ".go:hover{transform:translateY(-1px);box-shadow:0 14px 32px -10px rgba(46,230,196,.75)}.go:active{transform:none}"
-         ".hint{color:var(--dim);font:11px var(--mono);letter-spacing:.3px;text-align:center;margin:10px 0 0}"
+         ".go{width:100%;margin-top:20px;padding:14px 16px;border:0;border-radius:13px;cursor:pointer;"
+         "font:650 15px/1 var(--sans);letter-spacing:.2px;color:#fff;background:linear-gradient(180deg,#16a99b,#0e9488);"
+         "box-shadow:0 10px 24px -10px rgba(14,148,136,.7),inset 0 1px 0 rgba(255,255,255,.25);transition:transform .15s,filter .15s}"
+         ".go:hover{transform:translateY(-1px);filter:brightness(1.04)}.go:active{transform:none}"
+         ".hint{color:var(--faint);font:11px var(--mono);letter-spacing:.02em;text-align:center;margin:12px 0 0}"
          "@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}"
          "</style></head><body><main class='card'>"
          "<div class='hd'><span class='dot'></span><span class='wm'>netio<b>.probe</b></span></div>"
@@ -1200,19 +1205,19 @@ static void handleSave() {
   String body = F("<!DOCTYPE html><html lang='tr'><head><meta charset='utf-8'>"
                   "<meta name='viewport' content='width=device-width,initial-scale=1'>"
                   "<title>netio.probe</title><style>"
-                  ":root{--accent:#2ee6c4;--dim:#7f8ea8;--mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace}"
+                  ":root{--accent:#0e9488;--accent-d:#0b7d72;--accent-soft:#e4f5f2;--ink:#10202f;--muted:#5b6b80;--line:#e4eaf1;--mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace}"
                   "*{box-sizing:border-box}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;"
-                  "font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:#e6edf6;text-align:center;padding:24px;"
-                  "background:#06080f radial-gradient(720px 420px at 50% 0%,rgba(46,230,196,.12),transparent 60%) no-repeat}"
+                  "font-family:system-ui,-apple-system,'Segoe UI',sans-serif;color:var(--ink);text-align:center;padding:24px;"
+                  "background:radial-gradient(720px 420px at 50% 0%,rgba(14,148,136,.10),transparent 60%),#e8eef4}"
                   ".w{max-width:380px}"
                   ".ring{width:64px;height:64px;margin:0 auto 22px;border-radius:50%;"
-                  "border:3px solid rgba(127,142,168,.18);border-top-color:var(--accent);"
-                  "animation:s 1s linear infinite;box-shadow:0 0 26px -4px rgba(46,230,196,.5)}"
+                  "border:3px solid var(--line);border-top-color:var(--accent);"
+                  "animation:s 1s linear infinite}"
                   "@keyframes s{to{transform:rotate(360deg)}}"
                   "h2{font:700 18px var(--mono);letter-spacing:.3px;margin:0 0 10px}h2 b{color:var(--accent)}"
-                  "p{color:var(--dim);font:13px/1.5 var(--mono);margin:6px 0}"
-                  ".host{display:inline-block;margin-top:12px;padding:8px 13px;border:1px solid rgba(127,142,168,.18);"
-                  "border-radius:9px;color:var(--accent);font:13px var(--mono)}"
+                  "p{color:var(--muted);font:13px/1.5 var(--mono);margin:6px 0}"
+                  ".host{display:inline-block;margin-top:12px;padding:8px 13px;border:1px solid rgba(14,148,136,.22);"
+                  "border-radius:9px;background:var(--accent-soft);color:var(--accent-d);font:13px var(--mono)}"
                   "@media(prefers-reduced-motion:reduce){.ring{animation:none}}"
                   "</style></head><body><div class='w'><div class='ring'></div>"
                   "<h2>netio<b>.probe</b> kaydedildi</h2>"
@@ -1300,40 +1305,40 @@ static void startRunServices();
 
 // Tüm yönetim sayfalarının paylaştığı tema (flash'ta saklanır)
 static const char STYLE_BASE[] PROGMEM =
-  ":root{--ink:#e6edf6;--dim:#7f8ea8;--accent:#2ee6c4;--danger:#f0716a;--line:rgba(127,142,168,.16);"
-  "--mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace}"
+  ":root{--bg:#e8eef4;--card:#ffffff;--ink:#10202f;--muted:#5b6b80;--faint:#93a1b3;"
+  "--line:#e4eaf1;--line2:#eef3f8;--field:#f7fafc;--accent:#0e9488;--accent-d:#0b7d72;--accent-soft:#e4f5f2;"
+  "--danger:#e11d48;--danger-soft:#fdeaef;--low:#2563eb;--low-soft:#e8effd;--ok:#10b981;"
+  "--mono:ui-monospace,'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;"
+  "--sans:system-ui,-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif}"
   "*{box-sizing:border-box}html,body{margin:0;min-height:100%}"
-  "body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:var(--ink);"
-  "display:flex;align-items:flex-start;justify-content:center;padding:20px;position:relative;overflow-x:hidden;"
-  "background:#06080f radial-gradient(820px 460px at 50% -8%,rgba(46,230,196,.12),transparent 62%) no-repeat}"
-  "body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;"
-  "background:linear-gradient(rgba(127,142,168,.05) 1px,transparent 1px) 0 0/100% 30px,"
-  "linear-gradient(90deg,rgba(127,142,168,.05) 1px,transparent 1px) 0 0/30px 100%;"
-  "-webkit-mask:radial-gradient(680px 420px at 50% 8%,#000,transparent 78%);mask:radial-gradient(680px 420px at 50% 8%,#000,transparent 78%)}"
-  ".card{position:relative;z-index:1;width:100%;max-width:460px;background:rgba(15,21,35,.72);"
-  "-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border:1px solid var(--line);"
-  "border-radius:18px;padding:24px 22px 22px;box-shadow:0 30px 80px -30px rgba(0,0,0,.85),inset 0 0 0 1px rgba(46,230,196,.04)}"
-  ".hd{display:flex;align-items:center;gap:10px;margin:0 0 4px}"
-  ".dot{width:9px;height:9px;border-radius:50%;background:var(--accent);animation:pulse 2.2s infinite}"
-  "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(46,230,196,.55)}70%{box-shadow:0 0 0 9px rgba(46,230,196,0)}100%{box-shadow:0 0 0 0 rgba(46,230,196,0)}}"
-  ".wm{font:700 19px/1 var(--mono);letter-spacing:.3px}.wm b{color:var(--accent)}"
-  ".tag{font:600 10px/1 var(--mono);letter-spacing:2.4px;text-transform:uppercase;color:var(--dim);margin:0 0 18px}"
-  ".msg{color:var(--ink);font:14px/1.5 var(--mono);margin:4px 0}"
-  ".lbl{display:block;font:600 10.5px/1 var(--mono);letter-spacing:1.4px;text-transform:uppercase;color:var(--dim);margin:14px 0 6px}"
-  ".f{width:100%;padding:11px 12px;border-radius:10px;border:1px solid var(--line);background:rgba(8,12,22,.7);"
-  "color:var(--ink);font:14px var(--mono);outline:none;transition:border-color .15s,box-shadow .15s}"
-  ".f:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(46,230,196,.16)}"
-  ".pw{position:relative}.pw .f{padding-right:64px}"
-  ".pw button{position:absolute;right:5px;top:50%;transform:translateY(-50%);background:transparent;border:0;"
-  "color:var(--dim);font:600 11px var(--mono);letter-spacing:.5px;cursor:pointer;padding:7px 9px}.pw button:hover{color:var(--accent)}"
-  "details{margin-top:16px;border-top:1px solid var(--line);padding-top:12px}"
-  "summary{cursor:pointer;color:var(--accent);font:600 11px var(--mono);letter-spacing:1.2px;text-transform:uppercase;list-style:none}"
-  "summary::-webkit-details-marker{display:none}summary::before{content:'+ ';color:var(--dim)}details[open] summary::before{content:'– '}"
-  ".go{width:100%;margin-top:18px;padding:13px 16px;border:0;border-radius:11px;cursor:pointer;font:700 15px/1 system-ui;letter-spacing:.3px;"
-  "color:#04140f;background:linear-gradient(180deg,#3df0d0,#19c7a8);box-shadow:0 10px 26px -10px rgba(46,230,196,.65),inset 0 1px 0 rgba(255,255,255,.4);"
-  "transition:transform .15s}.go:hover{transform:translateY(-1px)}.go:active{transform:none}"
-  ".hint{color:var(--dim);font:11px var(--mono);letter-spacing:.3px;text-align:center;margin:10px 0 0}"
-  "a{color:var(--accent);text-decoration:none}"
+  "body{font-family:var(--sans);color:var(--ink);padding:28px 18px;display:flex;flex-direction:column;align-items:center;"
+  "background:radial-gradient(900px 520px at 50% -12%,rgba(14,148,136,.10),transparent 60%),"
+  "radial-gradient(700px 420px at 100% 0,rgba(37,99,235,.06),transparent 55%),#e8eef4;background-attachment:fixed}"
+  "body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;opacity:.5;"
+  "background-image:radial-gradient(rgba(16,32,47,.05) 1px,transparent 1.4px);background-size:22px 22px;"
+  "-webkit-mask:radial-gradient(760px 520px at 50% 4%,#000,transparent 80%);mask:radial-gradient(760px 520px at 50% 4%,#000,transparent 80%)}"
+  ".card{position:relative;z-index:1;width:100%;max-width:480px;background:var(--card);border:1px solid var(--line);"
+  "border-radius:22px;padding:28px 30px 24px;box-shadow:0 1px 2px rgba(16,32,47,.04),0 18px 50px -22px rgba(16,32,47,.22);animation:fade .5s ease both}"
+  "@keyframes fade{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:none}}"
+  ".hd{display:flex;align-items:center;gap:11px;margin:0 0 16px}"
+  ".dot{width:9px;height:9px;border-radius:50%;background:var(--accent);animation:pulse 2.4s infinite}"
+  "@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(14,148,136,.45)}70%{box-shadow:0 0 0 8px rgba(14,148,136,0)}100%{box-shadow:0 0 0 0 rgba(14,148,136,0)}}"
+  ".wm{font:700 20px/1 var(--mono);letter-spacing:-.2px}.wm b{color:var(--accent)}"
+  ".tag{font:600 10.5px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--faint);margin:0 0 20px}"
+  ".msg{color:var(--ink);font:14px/1.55 var(--sans);margin:6px 0}"
+  ".lbl{display:block;font:600 10px/1.3 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:13px 0 6px}"
+  ".f{width:100%;padding:11px 13px;border-radius:11px;border:1px solid var(--line);background:#fff;color:var(--ink);"
+  "font:14px var(--mono);outline:none;transition:border-color .15s,box-shadow .15s}"
+  ".f::placeholder{color:var(--faint)}.f:hover:not(:focus){border-color:#d3dbe6}"
+  ".f:focus{border-color:var(--accent);box-shadow:0 0 0 3.5px var(--accent-soft)}"
+  ".pw{position:relative}.pw .f{padding-right:70px}"
+  ".pw button{position:absolute;right:6px;top:50%;transform:translateY(-50%);background:transparent;border:0;"
+  "color:var(--accent-d);font:600 11px var(--mono);cursor:pointer;padding:7px 9px;border-radius:7px}.pw button:hover{background:var(--accent-soft)}"
+  ".go{width:100%;margin-top:22px;padding:14px 16px;border:0;border-radius:13px;cursor:pointer;font:650 15px/1 var(--sans);letter-spacing:.2px;color:#fff;"
+  "background:linear-gradient(180deg,#16a99b,#0e9488);box-shadow:0 10px 24px -10px rgba(14,148,136,.7),inset 0 1px 0 rgba(255,255,255,.25);transition:transform .15s,filter .15s}"
+  ".go:hover{transform:translateY(-1px);filter:brightness(1.04)}.go:active{transform:none}"
+  ".hint{color:var(--faint);font:11px var(--mono);letter-spacing:.02em;text-align:center;margin:12px 0 0}"
+  "a{color:var(--accent-d);text-decoration:none}"
   "@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}";
 
 // HTTP Basic Auth doğrulaması; başarısızsa 401 döndürüp false döner
@@ -1372,108 +1377,151 @@ static bool requireAuth() {
 }
 
 static String buildAdminPage() {
-  String p; p.reserve(8000);
+  String p; p.reserve(11000);
   p += F("<!DOCTYPE html><html lang='tr'><head><meta charset='utf-8'>"
          "<meta name='viewport' content='width=device-width,initial-scale=1'>"
          "<title>netio.probe · yönetim</title><style>");
   p += FPSTR(STYLE_BASE);
-  p += F(".pill{margin-left:auto;font:600 10px var(--mono);letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);"
-         "border:1px solid rgba(46,230,196,.35);border-radius:999px;padding:4px 10px}"
-         ".grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:4px 0 6px}"
-         ".m{background:rgba(8,12,22,.55);border:1px solid var(--line);border-radius:11px;padding:11px 12px}"
-         ".m label{display:block;font:600 9.5px var(--mono);letter-spacing:1.2px;text-transform:uppercase;color:var(--dim)}"
-         ".m b{display:block;font:600 19px/1.2 var(--mono);margin-top:5px}"
-         ".act{display:flex;gap:10px;margin-top:16px}.act form{flex:1;margin:0}"
-         ".btn{width:100%;padding:11px;border-radius:10px;cursor:pointer;font:600 13px var(--mono);letter-spacing:.4px;"
-         "background:transparent;border:1px solid var(--line);color:var(--ink);transition:.15s}"
-         ".btn:hover{border-color:var(--accent);color:var(--accent)}"
-         ".btn.dng:hover{border-color:var(--danger);color:var(--danger)}"
-         ".upl{display:block;text-align:center;margin-top:12px;padding:11px;border-radius:10px;border:1px dashed var(--line);color:var(--accent)}"
-         ".alm{display:none;margin:2px 0 12px;padding:11px 12px;border-radius:10px;font:600 12px var(--mono);text-align:center;letter-spacing:.5px}"
-         ".alm.on{display:block}"
-         ".cbx{display:flex;align-items:center;gap:8px;margin:10px 0;font:12px var(--mono);color:var(--ink)}"
-         ".st{font:12px var(--mono);color:var(--dim);margin-top:8px;min-height:15px}"
+  p += F(".card{max-width:720px}"
+         ".spec{margin-left:auto;display:flex;align-items:center;gap:12px}"
+         ".clk{font:600 11.5px var(--mono);color:var(--muted);font-variant-numeric:tabular-nums}"
+         ".pill{display:inline-flex;align-items:center;gap:6px;font:600 10.5px var(--mono);letter-spacing:.12em;text-transform:uppercase;"
+         "color:var(--accent-d);background:var(--accent-soft);border:1px solid rgba(14,148,136,.22);border-radius:999px;padding:5px 11px}"
+         ".pill i{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 6px var(--ok)}"
+         ".alm{display:none;align-items:center;gap:10px;margin:0 0 16px;padding:13px 15px;border-radius:14px;font:600 13px/1.35 var(--sans);border:1px solid transparent}"
+         ".alm.on{display:flex}"
+         ".alm .ic{flex:none;width:22px;height:22px;border-radius:7px;display:grid;place-items:center;font-size:14px;font-weight:800}"
+         ".alm.hi{background:var(--danger-soft);border-color:rgba(225,29,72,.25);color:#9f1239}.alm.hi .ic{background:#fbd0db}"
+         ".alm.lo{background:var(--low-soft);border-color:rgba(37,99,235,.22);color:#1e40af}.alm.lo .ic{background:#d7e3fd}"
+         ".tabs{display:flex;gap:1px;overflow-x:auto;margin:0 0 20px;border-bottom:1px solid var(--line);scrollbar-width:none}"
+         ".tabs::-webkit-scrollbar{display:none}"
+         ".tab{flex:none;background:none;border:0;cursor:pointer;padding:11px 14px;white-space:nowrap;margin-bottom:-1px;"
+         "font:600 11.5px var(--mono);letter-spacing:.07em;text-transform:uppercase;color:var(--muted);border-bottom:2px solid transparent;transition:color .15s,border-color .15s}"
+         ".tab:hover{color:var(--ink)}.tab.on{color:var(--accent-d);border-bottom-color:var(--accent)}"
+         ".panel{display:none;animation:fadep .25s ease both}.panel.active{display:block}"
+         "@keyframes fadep{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}"
+         ".ph{font:600 10.5px var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--faint);margin:0 0 14px}"
+         ".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}"
+         ".m{background:var(--field);border:1px solid var(--line);border-radius:14px;padding:14px 15px 15px}"
+         ".m label{display:block;font:600 9.5px var(--mono);letter-spacing:.13em;text-transform:uppercase;color:var(--faint)}"
+         ".m b{display:block;font:650 22px/1.15 var(--mono);margin-top:8px;letter-spacing:-.3px;font-variant-numeric:tabular-nums}"
+         ".fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(232px,1fr));gap:6px 18px}"
+         ".field{display:flex;flex-direction:column;min-width:0}"
+         ".cbx{display:flex;align-items:flex-start;gap:10px;margin:16px 0 2px;font:13px/1.4 var(--sans);color:var(--ink)}"
+         ".cbx input{margin:1px 0 0;width:17px;height:17px;accent-color:var(--accent);flex:none}"
+         ".st{font:12px var(--mono);color:var(--muted);margin-top:9px;min-height:15px}"
+         ".note{font:11.5px/1.45 var(--mono);color:var(--faint);margin:14px 0 0;padding:11px 13px;background:var(--field);border:1px solid var(--line);border-radius:11px}"
+         ".upl{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:18px;padding:13px;border-radius:12px;border:1.5px dashed #cbd6e2;color:var(--accent-d);font:600 13px var(--mono);text-decoration:none;transition:.15s}"
+         ".upl:hover{border-color:var(--accent);background:var(--accent-soft)}"
+         ".act{display:flex;gap:12px;margin-top:12px}.act form{flex:1;margin:0}"
+         ".btn{width:100%;padding:12px;border-radius:12px;cursor:pointer;font:600 13px var(--mono);background:#fff;border:1px solid var(--line);color:var(--ink);transition:.15s}"
+         ".btn:hover{border-color:var(--accent);color:var(--accent-d);background:var(--accent-soft)}"
+         ".btn.dng:hover{border-color:var(--danger);color:var(--danger);background:var(--danger-soft)}"
+         ".btn.mini{margin-top:14px;width:auto;padding:10px 16px;display:inline-block}"
+         ".sysrow{margin-top:22px;padding-top:18px;border-top:1px solid var(--line2)}"
+         ".foot{font:11px var(--mono);color:var(--faint);text-align:center;margin:18px 0 0}"
+         "@media(max-width:520px){.card{padding:22px 16px 18px;border-radius:18px}.fields{gap:6px 12px}}"
          "</style></head><body><main class='card'>"
-         "<div class='hd'><span class='dot'></span><span class='wm'>netio<b>.probe</b></span><span class='pill'>online</span></div>"
-         "<p class='tag'>SNMP PROBE · YÖNETİM</p>"
-         "<div id='alm' class='alm'></div>"
-         "<p class='hint' id='clk' style='margin:0 0 8px'></p>"
-         "<div class='grid'>"
+         "<header class='hd'><span class='dot'></span><span class='wm'>netio<b>.probe</b></span>"
+         "<span class='spec'><span class='clk' id='clk'></span><span class='pill'><i></i>online</span></span></header>"
+         "<div id='alm' class='alm'><span class='ic'>!</span><span id='almtx'></span></div>"
+         "<nav class='tabs'>"
+         "<button class='tab on' type='button' data-tab='dash'>Dashboard</button>"
+         "<button class='tab' type='button' data-tab='snmp'>SNMP</button>"
+         "<button class='tab' type='button' data-tab='guv'>Güvenlik</button>"
+         "<button class='tab' type='button' data-tab='wifi'>WiFi</button>"
+         "<button class='tab' type='button' data-tab='alarm'>Alarm</button>"
+         "<button class='tab' type='button' data-tab='trap'>TRAP</button>"
+         "<button class='tab' type='button' data-tab='hw'>Donanım</button>"
+         "<button class='tab' type='button' data-tab='ntp'>NTP</button>"
+         "</nav>"
+         "<div class='panel active' data-tab='dash'>"
+         "<section class='grid'>"
          "<div class='m'><label>Sıcaklık</label><b id='temp'>—</b></div>"
          "<div class='m'><label>RSSI</label><b id='rssi'>—</b></div>"
          "<div class='m'><label>Uptime</label><b id='up'>—</b></div>"
          "<div class='m'><label>Boş Heap</label><b id='heap'>—</b></div>"
          "<div class='m'><label>SNMP istek</label><b id='sn'>—</b></div>"
          "<div class='m'><label>Okuma / hata</label><b id='rd'>—</b></div>"
-         "</div>"
-         "<form method='POST' action='/save'>"
-         "<label class='lbl'>SNMP read community</label><input class='f' name='ro' value='");
+         "</section>"
+         "<div class='sysrow'>"
+         "<a class='upl' href='/update'>⤓ Firmware güncelle (.bin yükle)</a>"
+         "<div class='act'>"
+         "<form method='POST' action='/reboot' onsubmit='return confirm(\"Cihaz yeniden başlatılsın mı?\")'><button class='btn' type='submit'>Yeniden başlat</button></form>"
+         "<form method='POST' action='/reset' onsubmit='return confirm(\"TÜM ayarlar silinecek. Emin misiniz?\")'><button class='btn dng' type='submit'>Fabrika ayarları</button></form>"
+         "</div></div></div>"
+         "<form method='POST' action='/save' id='setform'>"
+         "<div class='panel' data-tab='snmp'><p class='ph'>SNMP / Sistem</p><div class='fields'>"
+         "<div class='field'><label class='lbl'>SNMP read community</label><input class='f' name='ro' value='");
   p += htmlEscape(cfg.roComm);
-  p += F("'><label class='lbl'>sysName</label><input class='f' name='sn' value='");
+  p += F("'></div><div class='field'><label class='lbl'>sysName</label><input class='f' name='sn' value='");
   p += htmlEscape(cfg.sysName);
-  p += F("'><label class='lbl'>sysLocation</label><input class='f' name='sl' value='");
+  p += F("'></div><div class='field'><label class='lbl'>sysLocation</label><input class='f' name='sl' value='");
   p += htmlEscape(cfg.sysLocation);
-  p += F("'><label class='lbl'>sysContact</label><input class='f' name='sc' value='");
+  p += F("'></div><div class='field'><label class='lbl'>sysContact</label><input class='f' name='sc' value='");
   p += htmlEscape(cfg.sysContact);
-  p += F("'><details><summary>Güvenlik & WiFi</summary>"
-         "<label class='lbl'>Yönetici kullanıcı</label><input class='f' name='au' value='");
+  p += F("'></div></div></div>"
+         "<div class='panel' data-tab='guv'><p class='ph'>Güvenlik / Erişim</p><div class='fields'>"
+         "<div class='field'><label class='lbl'>Yönetici kullanıcı</label><input class='f' name='au' value='");
   p += htmlEscape(cfg.adminUser);
-  p += F("'><label class='lbl'>Yönetici şifresi (boş = değişmez)</label><div class='pw'>"
+  p += F("'></div><div class='field'><label class='lbl'>Erişim listesi (CIDR)</label><input class='f' name='acl' value='");
+  p += htmlEscape(cidrStr());
+  p += F("'></div></div>"
+         "<label class='lbl'>Yönetici şifresi (boş = değişmez)</label><div class='pw'>"
          "<input class='f' id='ap' name='ap' type='password' autocomplete='off'>"
-         "<button type='button' onclick='pw(this,\"ap\")'>göster</button></div>"
-         "<label class='lbl'>OTA (espota) şifresi</label><input class='f' name='ota' value='");
-  p += htmlEscape(cfg.otaPass);
-  p += F("'><label class='lbl'>WiFi SSID (değişirse cihaz yeniden başlar)</label><input class='f' name='ssid' value='");
+         "<button type='button' onclick='pw(this,\"ap\")'>göster</button></div><div class='fields'>"
+         "<div class='field'><label class='lbl'>Syslog sunucu IP</label><input class='f' name='slog' value='");
+  p += htmlEscape(String(cfg.syslogIp));
+  p += F("'></div><div class='field'><label class='lbl'>Syslog UDP port</label><input class='f' name='slogp' value='");
+  p += String(cfg.syslogPort);
+  p += F("'></div></div></div>"
+         "<div class='panel' data-tab='wifi'><p class='ph'>WiFi / Uzaktan</p>"
+         "<label class='lbl'>WiFi SSID (değişirse cihaz yeniden başlar)</label><input class='f' name='ssid' value='");
   p += htmlEscape(cfg.ssid);
   p += F("'><label class='lbl'>WiFi şifresi (boş = değişmez)</label><div class='pw'>"
          "<input class='f' id='wp' name='pass' type='password' autocomplete='off'>"
          "<button type='button' onclick='pw(this,\"wp\")'>göster</button></div>"
-         "<label class='lbl'>Erişim listesi (CIDR · 0.0.0.0/0 = herkes)</label><input class='f' name='acl' value='");
-  p += htmlEscape(cidrStr());
-  p += F("'><label class='lbl'>Syslog sunucu IP (boş = kapalı)</label><input class='f' name='slog' value='");
-  p += htmlEscape(String(cfg.syslogIp));
-  p += F("'><label class='lbl'>Syslog UDP port</label><input class='f' name='slogp' value='");
-  p += String(cfg.syslogPort);
-  p += F("'></details>"
-         "<details><summary>Alarm &amp; TRAP</summary>"
+         "<label class='lbl'>OTA (espota) şifresi</label><input class='f' name='ota' value='");
+  p += htmlEscape(cfg.otaPass);
+  p += F("'></div>"
+         "<div class='panel' data-tab='alarm'><p class='ph'>Sıcaklık Eşiği / Alarm</p>"
          "<label class='cbx'><input type='checkbox' name='ten' value='1'");
   if (cfg.threshEnable) p += F(" checked");
-  p += F("> Sıcaklık eşiği / alarmı aktif</label>"
-         "<label class='lbl'>Üst eşik (°C)</label><input class='f' name='thi' type='number' step='0.1' value='");
+  p += F("><span>Sıcaklık eşiği / alarmı aktif</span></label><div class='fields'>"
+         "<div class='field'><label class='lbl'>Üst eşik (°C)</label><input class='f' name='thi' type='number' step='0.1' value='");
   p += String(cfg.threshHighDeci / 10.0, 1);
-  p += F("'><label class='lbl'>Alt eşik (°C)</label><input class='f' name='tlo' type='number' step='0.1' value='");
+  p += F("'></div><div class='field'><label class='lbl'>Alt eşik (°C)</label><input class='f' name='tlo' type='number' step='0.1' value='");
   p += String(cfg.threshLowDeci / 10.0, 1);
-  p += F("'><label class='lbl'>Histerezis (°C)</label><input class='f' name='thy' type='number' step='0.1' value='");
+  p += F("'></div><div class='field'><label class='lbl'>Histerezis (°C)</label><input class='f' name='thy' type='number' step='0.1' value='");
   p += String(cfg.threshHystDeci / 10.0, 1);
-  p += F("'><label class='lbl'>TRAP hedef IP (boş = kapalı · UDP 162)</label><input class='f' name='trap' value='");
+  p += F("'></div></div></div>"
+         "<div class='panel' data-tab='trap'><p class='ph'>SNMP TRAP</p><div class='fields'>"
+         "<div class='field'><label class='lbl'>TRAP hedef IP (UDP 162 · boş = kapalı)</label><input class='f' name='trap' value='");
   p += htmlEscape(String(cfg.trapTargetIp));
-  p += F("'><label class='lbl'>TRAP community</label><input class='f' name='trapc' value='");
+  p += F("'></div><div class='field'><label class='lbl'>TRAP community</label><input class='f' name='trapc' value='");
   p += htmlEscape(cfg.trapCommunity);
-  p += F("'><button class='btn' type='button' id='ttbtn' style='margin-top:10px'>Test trap gönder</button>"
-         "<div class='st' id='ttst'></div>"
-         "</details>"
-         "<details><summary>Donanım &amp; NTP</summary>"
-         "<label class='lbl'>DS18B20 veri pini (GPIO · güvenli: 4,5,12,13,14)</label><input class='f' name='dpin' type='number' min='0' max='16' value='");
+  p += F("'></div></div>"
+         "<button class='btn mini' type='button' id='ttbtn'>Test trap gönder</button><div class='st' id='ttst'></div></div>"
+         "<div class='panel' data-tab='hw'><p class='ph'>Donanım</p><div class='fields'>"
+         "<div class='field'><label class='lbl'>DS18B20 veri pini (4,5,12,13,14)</label><input class='f' name='dpin' type='number' min='0' max='16' value='");
   p += String(cfg.ds18b20Pin);
-  p += F("'><label class='cbx'><input type='checkbox' name='pup' value='1'");
-  if (cfg.usePullup) p += F(" checked");
-  p += F("> Dahili pull-up kullan (önerilmez; harici 4.7kΩ tercih edin)</label>"
-         "<label class='lbl'>Alarm LED / röle pini (GPIO · active-LOW)</label><input class='f' name='lpin' type='number' min='0' max='16' value='");
+  p += F("'></div><div class='field'><label class='lbl'>Alarm LED / röle pini</label><input class='f' name='lpin' type='number' min='0' max='16' value='");
   p += String(cfg.alarmLedPin);
-  p += F("'><label class='lbl'>NTP sunucusu (boş = kapalı · UTC zaman damgası)</label><input class='f' name='ntp' value='");
+  p += F("'></div></div>"
+         "<label class='cbx'><input type='checkbox' name='pup' value='1'");
+  if (cfg.usePullup) p += F(" checked");
+  p += F("><span>Dahili pull-up kullan (önerilmez; harici 4.7kΩ tercih edin)</span></label>"
+         "<p class='note'>Pin veya pull-up değişince cihaz yeniden başlar.</p></div>"
+         "<div class='panel' data-tab='ntp'><p class='ph'>NTP / Zaman</p>"
+         "<label class='lbl'>NTP sunucusu (boş = kapalı · UTC zaman damgası)</label><input class='f' name='ntp' value='");
   p += htmlEscape(cfg.ntpServer);
-  p += F("'><p class='hint'>Pin veya pull-up değişince cihaz yeniden başlar.</p>"
-         "</details>"
+  p += F("'><p class='note'>Senkron olunca syslog satırları UTC zaman damgası taşır ve panelde saat görünür.</p></div>"
          "<button class='go' type='submit'>Ayarları kaydet</button></form>"
-         "<a class='upl' href='/update'>⤓ Firmware güncelle (.bin yükle)</a>"
-         "<div class='act'>"
-         "<form method='POST' action='/reboot' onsubmit='return confirm(\"Cihaz yeniden başlatılsın mı?\")'>"
-         "<button class='btn' type='submit'>Yeniden başlat</button></form>"
-         "<form method='POST' action='/reset' onsubmit='return confirm(\"TÜM ayarlar silinip fabrika ayarına dönülecek. Emin misiniz?\")'>"
-         "<button class='btn dng' type='submit'>Fabrika ayarları</button></form>"
-         "</div>"
-         "<p class='hint'>http basic auth · snmp v2c düz metindir, güvenilir ağda kullanın</p>"
+         "<p class='foot'>http basic auth · snmp v2c düz metindir, güvenilir ağda kullanın</p>"
          "</main><script>"
+         "function showTab(t){var i,el=document.querySelectorAll('.tab');for(i=0;i<el.length;i++)el[i].classList.toggle('on',el[i].getAttribute('data-tab')===t);"
+         "var pn=document.querySelectorAll('.panel');for(i=0;i<pn.length;i++)pn[i].classList.toggle('active',pn[i].getAttribute('data-tab')===t);"
+         "document.getElementById('setform').style.display=(t==='dash')?'none':'block';}"
          "function pw(b,id){var i=document.getElementById(id);var s=i.type==='password';i.type=s?'text':'password';b.textContent=s?'gizle':'göster';}"
          "function fmtUp(s){var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+'g ':'')+(h?h+'s ':'')+m+'d';}"
          "function tick(){fetch('/status').then(function(r){return r.json();}).then(function(j){"
@@ -1483,13 +1531,14 @@ static String buildAdminPage() {
          "document.getElementById('heap').textContent=(j.heap/1024).toFixed(1)+' KB';"
          "document.getElementById('sn').textContent=j.sn;"
          "document.getElementById('rd').textContent=j.rd+' / '+j.er;"
-         "var al=document.getElementById('alm');"
-         "if(j.ten&&j.alarm===1){al.className='alm on';al.style.background='rgba(255,99,99,.15)';al.style.color='#ff8a8a';al.textContent='⚠ YÜKSEK SICAKLIK — '+(j.tempd/10).toFixed(1)+' °C (eşik '+(j.thi/10).toFixed(1)+')';}"
-         "else if(j.ten&&j.alarm===2){al.className='alm on';al.style.background='rgba(96,165,250,.15)';al.style.color='#93c5fd';al.textContent='⚠ DÜŞÜK SICAKLIK — '+(j.tempd/10).toFixed(1)+' °C (eşik '+(j.tlo/10).toFixed(1)+')';}"
-         "else{al.className='alm';al.textContent='';}"
-         "var ck=document.getElementById('clk');ck.textContent=j.ntp>0?('UTC '+new Date(j.ntp*1000).toISOString().replace('T',' ').substring(0,19)):'';"
+         "var al=document.getElementById('alm'),tx=document.getElementById('almtx');"
+         "if(j.ten&&j.alarm===1){al.className='alm on hi';tx.textContent='Yüksek sıcaklık — '+(j.tempd/10).toFixed(1)+' °C (eşik '+(j.thi/10).toFixed(1)+' °C)';}"
+         "else if(j.ten&&j.alarm===2){al.className='alm on lo';tx.textContent='Düşük sıcaklık — '+(j.tempd/10).toFixed(1)+' °C (eşik '+(j.tlo/10).toFixed(1)+' °C)';}"
+         "else{al.className='alm';tx.textContent='';}"
+         "document.getElementById('clk').textContent=j.ntp>0?('UTC '+new Date(j.ntp*1000).toISOString().replace('T',' ').substring(0,19)):'';"
          "}).catch(function(){});}"
-         "tick();setInterval(tick,4000);"
+         "var tb=document.querySelectorAll('.tab');for(var k=0;k<tb.length;k++){tb[k].addEventListener('click',function(){showTab(this.getAttribute('data-tab'));});}"
+         "showTab('dash');tick();setInterval(tick,4000);"
          "var tt=document.getElementById('ttbtn');if(tt){tt.addEventListener('click',function(){var s=document.getElementById('ttst');s.textContent='Gönderiliyor…';fetch('/testtrap',{method:'POST'}).then(function(r){return r.text();}).then(function(t){s.textContent=t;}).catch(function(){s.textContent='Hata.';});});}"
          "</script></body></html>");
   return p;
@@ -1501,12 +1550,12 @@ static String buildUpdatePage() {
          "<meta name='viewport' content='width=device-width,initial-scale=1'>"
          "<title>netio.probe · firmware</title><style>");
   p += FPSTR(STYLE_BASE);
-  p += F(".drop{margin-top:6px;border:1px dashed var(--line);border-radius:12px;padding:18px;text-align:center;"
-         "background:rgba(8,12,22,.4);color:var(--dim);font:13px var(--mono)}"
-         ".drop b{color:var(--ink)}.drop input{display:block;margin:12px auto 0;color:var(--dim);font:12px var(--mono)}"
-         ".bar{height:8px;border-radius:6px;background:rgba(127,142,168,.18);overflow:hidden;margin-top:16px;display:none}"
+  p += F(".drop{margin-top:6px;border:1.5px dashed #cbd6e2;border-radius:12px;padding:20px;text-align:center;"
+         "background:var(--field);color:var(--muted);font:13px var(--mono)}"
+         ".drop b{color:var(--ink)}.drop input{display:block;margin:12px auto 0;color:var(--muted);font:12px var(--mono)}"
+         ".bar{height:8px;border-radius:6px;background:var(--line2);overflow:hidden;margin-top:16px;display:none}"
          ".bar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}"
-         ".st{font:12px var(--mono);color:var(--dim);text-align:center;margin-top:10px;min-height:16px}"
+         ".st{font:12px var(--mono);color:var(--muted);text-align:center;margin-top:10px;min-height:16px}"
          ".back{display:inline-block;margin-top:16px;font:12px var(--mono)}"
          "</style></head><body><main class='card'>"
          "<div class='hd'><span class='dot'></span><span class='wm'>netio<b>.probe</b></span></div>"
@@ -1827,7 +1876,7 @@ static void serviceSensor() {
 void setup() {
   Serial.begin(115200);
   delay(50);
-  Serial.println(F("\n\n=== netio.probe v1.4 (ESP8266 DS18B20 SNMP) ==="));
+  Serial.println(F("\n\n=== netio.probe v1.5 (ESP8266 DS18B20 SNMP) ==="));
   Serial.println("Chip ID : 0x" + String(ESP.getChipId(), HEX));
   Serial.println("Host    : " + hostName());
   Serial.println("Free Heap: " + String(ESP.getFreeHeap()) + " B");
@@ -1972,3 +2021,4 @@ void loop() {
  *  - Fabrika reset: web UI düğmesi VEYA GPIO14(D5)<->GND ~2 sn köprü VEYA GPIO0 3 sn.
  *  - Production için SNMPv3 (auth+priv) + HTTPS/ters proxy önerilir; bu agent v2c kapsamındadır.
  * ===================================================================================== */
+
