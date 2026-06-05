@@ -2,7 +2,7 @@
  
 **A self-contained SNMP v2c temperature probe for the ESP8266 + DS18B20 — zero external libraries.**
  
-`netio.probe` turns a NodeMCU (ESP8266) and a single DS18B20 sensor into a proper, monitorable network device. It reads temperature over 1-Wire and publishes it as a **real SNMP v2c agent** (hand-written BER/ASN.1 — `snmpwalk` / `snmpget` work out of the box), exposes a **modern, password-protected web management UI**, supports **browser-based OTA** firmware updates, and ships a **first-boot Wi-Fi captive portal** so it can be provisioned without recompiling.
+`netio.probe` turns a NodeMCU (ESP8266) and a single DS18B20 sensor into a proper, monitorable network device. It reads temperature over 1-Wire and publishes it as a **real SNMP v2c agent** (hand-written BER/ASN.1 — `snmpwalk` / `snmpget` work out of the box), exposes a **redesigned, light-themed, password-protected web management UI** (a tabbed layout with a read-only dashboard plus per-area settings tabs), supports **browser-based OTA** firmware updates, and ships a **first-boot Wi-Fi captive portal** so it can be provisioned without recompiling.
  
 It is a self-alerting probe: configurable **temperature thresholds with hysteresis** drive an alarm state, an onboard **LED**, and **SNMP v2c traps** pushed to your NMS. As of **v1.4**, the **hardware pins, pull-up mode, and NTP** are all configurable from the web UI — no recompiling to move the sensor pin or sync the clock — on top of the v1.2 security/observability layer (source-IP ACL, salted-hash auth with brute-force lockout, Prometheus `/metrics`, remote syslog).
  
@@ -13,12 +13,12 @@ Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, Da
 ![protocol](https://img.shields.io/badge/SNMP-v2c%20%2B%20traps-success)
 ![metrics](https://img.shields.io/badge/metrics-Prometheus-orange)
 ![libraries](https://img.shields.io/badge/external%20libs-none-brightgreen)
-![version](https://img.shields.io/badge/firmware-v1.4-informational)
-
+![version](https://img.shields.io/badge/firmware-v1.5-informational)
+ 
 ---
 
-![Web UI](Screenshot.png)
- 
+![Web UI](Screenshot_v1.5.png)
+
 ---
  
 ## Table of contents
@@ -47,6 +47,11 @@ Everything depends only on the **ESP8266 Arduino Core** — no SNMP, OneWire, Da
  
 ## What's new
  
+### v1.5 — redesigned web interface
+ 
+- **Light theme across every page** — the management UI, the Wi-Fi captive portal, the OTA page, and the reboot/reset/result pages all share a wide, airy "instrument" look (still system-font, zero external assets, served straight from flash).
+- **Tabbed management UI.** Settings are no longer stacked accordions — they're split into top tabs: **Dashboard · SNMP · Güvenlik · WiFi · Alarm · TRAP · Donanım · NTP**. **Dashboard** is read-only telemetry (temperature, RSSI, uptime, free heap, SNMP requests, read/error) plus system actions; the other tabs group the settings into one form saved with a single button. The **alarm banner** and **UTC clock** stay visible on every tab.
+- **UI-only release — fully config-compatible with v1.4.** `CFG_MAGIC` is unchanged, so flashing v1.5 over v1.4 keeps every setting; **no migration runs**. All SNMP/alarm/trap/NTP behaviour, field names, `/status`, and `/testtrap` are unchanged.
 ### v1.4 — runtime hardware configuration & NTP
  
 - **Configurable GPIO from the UI.** The **DS18B20 data pin**, the **internal/external pull-up** mode, and the **alarm LED/relay pin** are now runtime settings under **Hardware & NTP** — no recompiling to re-wire. The compile-time `#define`s are just the defaults. Pin/pull-up changes reboot the device so the 1-Wire bus re-initialises cleanly.
@@ -128,7 +133,7 @@ In RUN mode, if Wi-Fi stays down for more than 120 seconds the device reboots an
 | GND | GND |
 | DATA | **GPIO4 (D2)** — default; changeable in the UI |
  
-> ⚠️ **An external 4.7 kΩ pull-up between DATA and 3V3 is strongly recommended.** The ESP8266's internal pull-up (~30 kΩ+) is too weak for reliable 1-Wire timing, especially with Wi-Fi active. The internal pull-up can now be toggled from the UI (**Hardware & NTP → internal pull-up**) if you have no external resistor, but it is **not recommended**.
+> ⚠️ **An external 4.7 kΩ pull-up between DATA and 3V3 is strongly recommended.** The ESP8266's internal pull-up (~30 kΩ+) is too weak for reliable 1-Wire timing, especially with Wi-Fi active. The internal pull-up can now be toggled from the UI (**Donanım → internal pull-up**) if you have no external resistor, but it is **not recommended**.
  
 ### Alarm output & factory-reset header
  
@@ -177,11 +182,15 @@ If you see a wall of `redefinition of '...'` / `multiple definition of '...'` er
  
 ## Upgrading
  
-Just flash the new firmware over the old one (USB or OTA). On the first boot it detects the older EEPROM layout and **migrates it automatically** — **v1.1 → v1.4**, **v1.2 → v1.4**, and **v1.3 → v1.4** are all supported:
+Just flash the new firmware over the old one (USB or OTA).
+ 
+**Upgrading to v1.5** is the simplest case: it's a **UI-only** release with the **same EEPROM layout as v1.4** (`CFG_MAGIC` unchanged), so flashing v1.5 over v1.4 keeps every setting and **runs no migration** at all.
+ 
+Coming from an **older** build, the first boot detects the older EEPROM layout and **migrates it automatically** — **v1.1 → v1.4**, **v1.2 → v1.4**, and **v1.3 → v1.4** are all supported (the v1.4 layout is what v1.5 uses):
  
 - Wi-Fi credentials, SNMP read community, `sysName` / `sysLocation` / `sysContact`, OTA password, admin username, the ACL/syslog settings, and (from v1.3) the thresholds and trap target are **preserved**.
 - From **v1.2/v1.3**, the salted password hash is carried over as-is (nothing to re-enter). From **v1.1**, the old plaintext password is re-hashed into the new salted form.
-- New v1.4 settings (sensor pin, pull-up mode, alarm-LED pin, NTP server) start at their **defaults**, so behaviour is unchanged until you adjust them.
+- New (v1.4) settings — sensor pin, pull-up mode, alarm-LED pin, NTP server — start at their **defaults**, so behaviour is unchanged until you adjust them.
 No factory reset and no re-provisioning are needed. (A factory reset is still available if you *want* a clean slate.)
  
 ---
@@ -215,15 +224,17 @@ Once on your network, browse to the device IP (or `netio-probe-<chip-id>.local`)
  
 > 🔐 **Change these on first login.** The password is stored only as a salted hash. Leaving a password field blank keeps the current one.
  
-The dashboard shows live telemetry (temperature, RSSI, uptime, free heap, SNMP request count, read/error counters), a **colour-coded alarm banner**, and a **UTC clock** (when NTP is synced), refreshed every few seconds via a `/status` JSON endpoint. It lets you:
+The interface uses a **tabbed layout** with a persistent header (wordmark, **UTC clock** when NTP is synced, online pill) and a **colour-coded alarm banner** that stays visible on every tab.
  
-- edit the **SNMP read community** (applied live) and `sysName` / `sysLocation` / `sysContact`;
-- configure **temperature thresholds, hysteresis, and the SNMP trap target/community** (with a **Test trap** button);
-- set the **access-control CIDR**, **syslog server IP**, and **syslog port**;
-- set the **DS18B20 data pin, pull-up mode, alarm-LED pin, and NTP server** (**Hardware & NTP**);
-- change **admin** credentials, the **OTA** (espota) password, and **Wi-Fi** credentials;
-- open the **firmware update** page; **reboot** or **factory reset**.
-Changing **Wi-Fi credentials or any hardware pin / pull-up** triggers an automatic reboot; everything else applies live.
+- **Dashboard** — read-only telemetry tiles (temperature, RSSI, uptime, free heap, SNMP request count, read/error counters), refreshed every few seconds via a `/status` JSON endpoint, plus system actions: **firmware update**, **reboot**, and **factory reset**.
+- **SNMP** — the **read community** (applied live) and `sysName` / `sysLocation` / `sysContact`.
+- **Güvenlik** — **admin** username/password, the **access-control CIDR**, and **syslog** server IP/port.
+- **WiFi** — **Wi-Fi** SSID/password and the **OTA** (espota) password.
+- **Alarm** — enable the alarm and set **high / low thresholds** and **hysteresis**.
+- **TRAP** — the **SNMP trap target/community** and a **Test trap** button.
+- **Donanım** — the **DS18B20 data pin**, **pull-up mode**, and **alarm-LED pin**.
+- **NTP** — the **NTP server**.
+All settings tabs are one form, saved with a single **"Ayarları kaydet"** button. Changing **Wi-Fi credentials or any hardware pin / pull-up** triggers an automatic reboot; everything else applies live.
  
 | Endpoint | Method | Auth | Purpose |
 |----------|--------|------|---------|
@@ -240,7 +251,7 @@ Changing **Wi-Fi credentials or any hardware pin / pull-up** triggers an automat
  
 ## Hardware & NTP configuration
  
-Set under **Hardware & NTP** in the management UI.
+Set under the **Donanım** (hardware) and **NTP** tabs in the management UI.
  
 | Setting | Default | Notes |
 |---------|---------|-------|
@@ -257,7 +268,7 @@ Because the 1-Wire driver re-initialises the bus from scratch, a pin or pull-up 
  
 ## Temperature alarms & SNMP traps
  
-Configure these under **Alarm & TRAP** in the management UI.
+Configure these under the **Alarm** and **TRAP** tabs in the management UI.
  
 ### Thresholds & hysteresis
  
@@ -535,14 +546,14 @@ Be clear about what the device does and does not protect:
 - `GETBULK` is handled as a single repetition (protocol-legal; walks still complete).
 - Traps are **v2c `Trap`** (fire-and-forget UDP), not acknowledged `INFORM`.
 - One DS18B20 per device (Skip ROM addressing); multi-sensor 1-Wire enumeration is not implemented.
-**Roadmap (not in v1.4)**
+**Roadmap (not in v1.5)**
  
-- **SNMPv3** (USM: HMAC-SHA auth + AES-128 privacy, engine discovery, time-window) — the next planned release.
+- **SNMPv3** (USM: HMAC-SHA auth + AES-128 privacy, engine discovery, time-window) — the next planned release (v1.6).
 - `INFORM` (acknowledged) traps.
 - **MQTT** publishing (Telegraf / Home Assistant).
 - **Multi-sensor** 1-Wire enumeration and optional SHT3x humidity.
 - Configurable PEN from the UI.
+
 ---
  
-<sub>netio.probe · ESP8266 + DS18B20 · SNMP v2c temperature probe firmware (v1.4)</sub>
- 
+<sub>netio.probe · ESP8266 + DS18B20 · SNMP v2c temperature probe firmware (v1.5)</sub>
